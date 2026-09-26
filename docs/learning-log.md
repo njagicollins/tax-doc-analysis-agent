@@ -195,3 +195,31 @@ uv run python scripts/check_openai.py
 - **Mistake:** first run printed nothing. The file was empty (0 bytes) because I hadn't saved it. Unsaved tab = ● dot. Fix: Ctrl+S, or turn on File → Auto Save.
 - Debugging rule: "no output, no error" often means the code never ran. Check simple causes first.
 - **ruff has two jobs:** `ruff check` = find mistakes; `ruff format` = fix layout automatically (e.g. 2 spaces before an inline `#` comment). `ruff format --check` = report only, change nothing.
+
+### Step 9: Commit, push, first pull request
+**What:**
+```bash
+git add .                                  # (planned: add specific files)
+git commit -m "Set up Python project with uv, pytest, ruff and OpenAI check"
+# ticked Phase 0 in ENGINEERING_GUIDE.md
+git commit -m "..."                        # reworded later, see below
+git push -u origin phase-0-setup
+git commit --amend -m "Mark Phase 0 complete in engineering guide"
+git push --force-with-lease
+```
+Opened **PR #1** on GitHub (base `main` ← compare `phase-0-setup`), reviewed Files changed, merged.
+Cleanup: `git switch main && git pull && git branch -d phase-0-setup && git push origin --delete phase-0-setup`
+
+**Why:** GitHub Flow: work on a branch, review via PR, merge into `main`.
+**Learned:**
+- **Mistake:** used `git add .` → setup + learning log went into one commit instead of two. `.env` was safe thanks to `.gitignore`. `git add .` adds everything not ignored; always `git status` after it.
+- Undo the last **unpushed** commit, keeping changes staged: `git reset --soft HEAD~1`.
+- Git commits **changes**, not files. A file already in history still needs a new commit when edited.
+- `git log --oneline` = history, one line per commit (short ID + message). The ID is a short SHA hash. `git show <id>` shows what a commit changed.
+- `git push -u origin <branch>` = first push of a new branch; `-u` links it so plain `git push` works after.
+- **Rewording a pushed commit:** `git commit --amend -m "..."` then `git push --force-with-lease`. `--force-with-lease` refuses if someone else pushed meanwhile (safer than `--force`). Only rewrite **your own unmerged** branch, never `main`.
+- A PR doesn't finish by itself; it waits for a human to review and merge (no automatic checks until Phase 8).
+- GitHub's file list shows the **last commit that touched** each file, not a file description.
+- After merging: update local `main` (`git pull`), delete the branch locally (`-d`) and on GitHub (`push origin --delete`).
+
+**✅ Phase 0 complete.**
