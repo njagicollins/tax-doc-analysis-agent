@@ -9,6 +9,7 @@ An AI-assisted system for quarterly payroll tax analysis, designed for Azure.
 The problem: corporate tax teams analyze large sets of tax documents every quarter by hand. The documents are PDFs and Excel files that live in payroll platforms such as ADP and in SaaS SQL databases. This project makes that analysis faster, more accurate and **traceable for audit**, keeps **humans in control** of every decision that matters, and requires **no manual file handling**.
 
 The analysis being automated:
+
 - extract figures from W-2s, Form 941s, state filings and payroll registers
 - reconcile them against each other (for example, payroll-register wages vs 941 wages vs the W-2 totals)
 - compare with the previous quarter
@@ -74,7 +75,7 @@ docs/                 architecture.md, plan.md
 
 ## Current status
 
-- [ ] Phase 0: repo setup
+- [X] Phase 0: repo setup
 - [ ] Phase 1: synthetic data + mock sources
 - [ ] Phase 2: ingestion
 - [ ] Phase 3: extraction + schema

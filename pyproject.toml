@@ -1,0 +1,26 @@
+[project]
+name = "taxagent"
+version = "0.1.0"
+description = "AI-assisted quarterly payroll tax analysis with audit traceability"
+readme = "README.md"
+authors = [
+    { name = "Collins Njagi", email = "njagicollins20@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=3.19.2",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+taxagent = "taxagent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
