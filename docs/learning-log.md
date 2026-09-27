@@ -614,3 +614,35 @@ SQLite DB  ───┘
 - `field(default_factory=list)` → each result gets its **own** list. `= []` would make all results share one list (**mutable default** trap).
 - **Why 2 manifest rows but 1 file** (I didn't know; it's Step 2's idea again): the raw store records **content** (each unique doc once); the manifest records **events** (every fetch). 1 file proves no duplicates; 2 rows prove the second run left evidence of "checked, unchanged". Regression test for the audit trail.
 - Learning tip: when stuck, ask "**which earlier idea is this?**" Core idea here: **store content once, log every event**.
+
+### Step 6: The `taxagent ingest` command (`src/taxagent/cli.py`)
+**What:**
+- `pyproject.toml` → `[project.scripts] taxagent = "taxagent.cli:main"` (this line creates the command). Emptied `src/taxagent/__init__.py`.
+- Settings: `ADP_API_KEY`, `PAYROLL_DB_PATH` (product side). The server keeps `MOCK_ADP_API_KEY`. Locally both keys are `dev-key`; in production only `ADP_API_KEY` exists → no code change.
+- `tests/test_cli.py` (5 tests via `parametrize`) → **37 passed**.
+- Real run (server in terminal 1, command in terminal 2):
+  - Run 1: `23 new, 0 unchanged, 0 changed`
+  - Run 2: `0 new, 23 unchanged, 0 changed` → manifest has **46 rows**.
+
+**Why 23 files?** ADP has 24; Q2 skips the two Q1 docs (941 + register) → 22 (Q2 941, Q2 register, 20 annual W-2s) + 1 SQL snapshot CSV = **23**. Proves the quarter filter works.
+**Why the 2nd run found nothing new:** same ADP files + byte-identical CSV (deterministic export) → same hashes → nothing stored, but 23 more manifest rows (store once, log every event). Without `ORDER BY` we'd get a false "1 changed" every run.
+
+**Learned:**
+- The product must never say "mock": neutral setting names so production is config-only.
+- **argparse** = built-in commands/options; **subcommands** (`ingest`) leave room for `extract`, `review`… (like `git commit`).
+- `type=quarter_arg` validates at the door; regex `^...$` = the **whole** text must match (`2026Q5` rejected).
+- `main(argv=None)`: real runs read the terminal, tests pass a list (dependency injection).
+- `except httpx2.ConnectError` → one clear sentence instead of a 40-line traceback. Still fails (exit code 1), just **readably**.
+- The `sources = [...]` list is the **only** place that knows the concrete sources.
+- `@pytest.mark.parametrize` = run one test for many inputs.
+- Switch VS Code terminals: dropdown / list in the terminal panel, or Ctrl+PageUp/PageDown.
+
+### Commit order mistake
+- **Mistake:** I committed the CLI without the sources/pipeline commits → that commit **imported files not in git** → broken if checked out.
+- Rule: **every commit should work on its own** (any point in history can be checked out and tested).
+- Fix (unpushed, so safe): `git reset --soft HEAD~1` (undo last commit, keep changes staged) → `git restore --staged .` (unstage all, files stay changed) → re-commit in **dependency order**: sources → pipeline → CLI → log.
+- Verified: each commit passes on its own (29 → 32 → 37 tests).
+
+**✅ Phase 2 complete.**
+
+**Phase 2 in 60 seconds:** `uv run taxagent ingest --quarter 2026Q2` pulls every document for a quarter from the ADP API and the SQL database (exported as a deterministic CSV snapshot). Each file is stored write-once and read-only, named by its SHA-256 hash (content-addressed), so duplicates are skipped, changed documents are kept side by side and flagged, and tampering is detected on re-runs. Every fetch is logged in an append-only JSONL manifest with a run ID and UTC timestamp. Sources hide behind one Protocol, so production is a config change, and 37 tests (using fakes, no network) lock it all in.
