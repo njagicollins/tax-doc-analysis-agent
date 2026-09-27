@@ -732,3 +732,32 @@ SQLite DB  ───┘
   - With 3: 941 = SQL = $508,125, register = $470,625 → register is the odd one out, and E013 is in SQL but not the register.
   - = **triangulation**: an independent third source identifies which of two is wrong (the analyst still confirms).
   - "Should contain the same data" is an **assumption**; our job is to **check** assumptions (exports drop rows, copies go stale).
+
+### Step 5: `taxagent extract` (`src/taxagent/extraction/run.py`)
+**What:**
+1. Reads the manifest → **latest version** of each document for the quarter (`latest[(source, name)] = row`: later rows overwrite earlier ones).
+2. **Re-checks each file's hash against the manifest** before reading → never extract from tampered evidence (`TamperedFileError`).
+3. Picks the extractor **by document name** (simple **rule-based classifier**; Phase 5's LLM will classify unknown ones). Unknown document → error, never silently skipped.
+4. Saves all values to `data/extracted/<quarter>/values.jsonl` (Pydantic `model_dump_json()` / `model_validate_json()`).
+5. Lists values below **0.95** confidence for human review.
+- Real run: **369 values** (register 120 + 941 9 + W-2s 120 + SQL 120); **6 need review, all E017** → planted error #4 caught automatically. **71 passed**.
+
+**Learned:**
+- `data/raw/` = **evidence** (never overwritten). `data/extracted/` = **derived data** (rebuildable from raw → safe to overwrite; improve the extractor, just re-run).
+- **Integration test:** real generator + real ingestion + real extractors together; only the server is replaced (`FolderSource`). `monkeypatch.chdir(tmp_path)` = temporarily change working folder.
+- Two `parametrize` decorators = **every combination** (2 commands × 4 bad quarters = 8 tests).
+- `{text:<22}` = pad to 22 characters, left-aligned.
+- **"Address already in use" (port 8000):** an old copy of the server was still running. Two programs can't share one port. Use the running one, or stop it (Ctrl+C in its terminal, or `Stop-Process -Id <PID>` / `taskkill //PID <PID> //F`). PIDs change each start.
+- **Why only E017 was flagged:**
+  - My answer: not an extraction failure; it's computation/reconciliation's job.
+  - Refinement: not a failure of **anything**. Phase 4 isn't built yet.
+  - **Confidence measures the *reading*, not the *document*.** The typo was read correctly (0.98): the document is wrong, our reading is right. A missing row can only be noticed by comparing sources. The bonus is only visible between quarters.
+
+| Question | Owner | Our errors |
+|---|---|---|
+| Did we **read** it correctly? | Extraction (confidence) | #4 blurry scan ✅ |
+| Is the **document** correct? | Reconciliation + variance (Phase 4) | #1, #2, #3 |
+
+**✅ Phase 3 complete.**
+
+**Phase 3 in 60 seconds:** `uv run taxagent extract --quarter 2026Q2` turns every stored document into values in one canonical Pydantic schema, each with a `SourceRef` (file hash + page and bounding box for PDFs, sheet and cell for Excel/CSV) and a confidence score. Excel and CSV are read cell by cell (never OCR'd, confidence 1.0); PDFs are read by finding each label and the numbers on the same row (0.98, because the match is inferred); scans have no text, so their values are `None` with confidence 0, never guessed. Files are re-hashed against the manifest before reading, and anything below 0.95 goes to human review, which caught the blurry W-2 automatically. The extractor reports documents exactly as printed; judging them is Phase 4's job.

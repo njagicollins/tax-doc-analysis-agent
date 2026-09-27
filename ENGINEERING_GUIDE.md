@@ -78,7 +78,7 @@ docs/                 architecture.md, plan.md
 - [X] Phase 0: repo setup
 - [X] Phase 1: synthetic data + mock sources
 - [X] Phase 2: ingestion
-- [ ] Phase 3: extraction + schema
+- [X] Phase 3: extraction + schema
 - [ ] Phase 4: deterministic compute
 - [ ] Phase 5: LangGraph agent
 - [ ] Phase 6: Streamlit app
