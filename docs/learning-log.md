@@ -437,3 +437,48 @@ uv run python -m synthetic   # → 24 source files + data/golden/golden.json
 - Tests go **one file per topic** in `tests/`; pytest finds every `test_*.py`.
 - Test the **calculations**, not file writing → fast tests.
 - `%` = modulo (remainder). `x % 9 == 0` = divides evenly by 9.
+
+### Step 9: Mock ADP API (`mock_sources/adp_api.py`)
+**Concepts:**
+- **API** = how one program asks another for something over the network (restaurant: you → waiter/API → kitchen/data).
+- **Endpoints** = the menu: `GET /documents` (list files), `GET /documents/{name}` (download one). GET = give me; POST = send; DELETE = remove.
+- **Status codes:** 200 OK · 401 not logged in · 404 not found · 422 badly formed request.
+- **FastAPI** = where you write endpoints. **uvicorn** = the server that listens on a port and passes requests to FastAPI.
+- `127.0.0.1` = **localhost** (this computer, not reachable from the internet); `8000` = the **port** (door number).
+
+**Why a fake server instead of reading the folder?**
+- My answer: in production the docs come from ADP (and SaaS SQL) over the network.
+- Plus: real-world problems appear early (logins, 404s, server down), so ingestion isn't naive.
+- Plus: swapping to real ADP = change the URL + key in config, not the code (adapter idea).
+
+**What:**
+```bash
+uv add fastapi uvicorn
+uv run uvicorn mock_sources.adp_api:app --reload   # keep this terminal open
+# browser → http://127.0.0.1:8000/docs
+```
+- `.env.example`: `ADP_BASE_URL=http://127.0.0.1:8000`, `MOCK_ADP_API_KEY=` (**empty**). `.env`: real value.
+- Tested in the `/docs` page: with key → **200** + list of 24 files; no/wrong key → **401 Unauthorized**.
+
+**Learned:**
+- `@app.get(...)` = **decorator**: attaches the function to a URL.
+- `Header()` reads request **headers** (`x_api_key` → `X-API-Key`). `Depends(check_api_key)` runs the check before every endpoint. `HTTPException(401)` = reply with an error.
+- **Path traversal:** asking for `../../.env` to escape the folder and steal secrets. Defence = only serve names from an **allow-list**.
+- **Security habit (my question):** `.env.example` is committed → even a harmless key shouldn't go there. Rule: names + harmless defaults (URLs, model names) only; anything granting access stays **empty**.
+- **Fail loudly:** `os.environ["KEY"]` crashes at startup if missing; `os.environ.get("KEY", "dev-key")` silently used a hidden default key. Crash > silent default.
+- `ERR_CONNECTION_REFUSED` = nothing listening on that port → the server isn't running. A server lives only as long as its terminal; use a **second terminal** for other commands.
+- Swagger "Server response" = what actually happened; "Responses" = documentation of possible codes.
+- E017 scan = 452,364 bytes vs ~3,437 for text W-2s (~130×): images are big → size hints a PDF is a scan.
+- Both 941s are 4,661 bytes despite the typo (swapping digits keeps the length) → **size proves nothing about content; a hash does**.
+
+### Step 9b: Tests for the server (`tests/conftest.py`, `tests/test_mock_adp.py`)
+**What:** `uv add --dev httpx2`; 6 tests: missing key → 401, wrong key → 401, list → 200, download → exact bytes, unknown file → 404, path traversal (`..%2F..%2F.env`) → 404. `uv run pytest -v` → **10 passed**.
+**Learned:**
+- **`TestClient`** sends requests to the app **inside Python**: no uvicorn, no port, no browser → fast. The running server isn't needed (a busy terminal just can't take commands → Ctrl+C or open a second terminal).
+- **`conftest.py`** runs before tests; gives tests their own key (`os.environ.setdefault`) because the server fails loudly without one.
+- **Fixture** (`@pytest.fixture`) = reusable setup; a test gets it by naming it as a parameter.
+- **`tmp_path`** = fresh empty temp folder per test. **`monkeypatch`** = temporarily swap a value (pointed `DOCUMENTS_DIR` at the temp folder), restored after.
+- `b"..."` = **bytes** (raw file content). `%2F` = `/` inside a URL.
+- Tests must not need `.env` or `data/` → they pass on **any machine** (fresh clones, CI).
+- **Regression test** (I didn't know this one): the traversal test passes today, but protects the **future**. If someone "simplifies" the code and removes the allow-list, the test fails before the bug reaches `main`. Rule: when you fix a bug or add a protection, add a test that proves it; the test also documents *why* the code exists.
+- **Caught before commit:** `.env.example` still had `MOCK_ADP_API_KEY=dev-key`. Review `git diff` before committing.
