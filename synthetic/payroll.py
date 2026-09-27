@@ -29,6 +29,7 @@ class PayrollLine:
     regular_wages: Decimal
     bonus: Decimal
     gross_wages: Decimal
+    ss_wages: Decimal
     federal_tax: Decimal
     ss_tax: Decimal
     medicare_tax: Decimal
@@ -60,6 +61,7 @@ def generate_payroll(
                     regular_wages=regular,
                     bonus=bonus,
                     gross_wages=gross,
+                    ss_wages=ss_wages,
                     federal_tax=money(gross * FEDERAL_RATE),
                     ss_tax=money(ss_wages * SS_RATE),
                     medicare_tax=money(gross * MEDICARE_RATE),
