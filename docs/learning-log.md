@@ -508,4 +508,57 @@ uv run uvicorn mock_sources.adp_api:app --reload   # keep this terminal open
 
 **✅ Phase 1 complete.**
 
+### Phase 1 wrap-up (PRs #2 and #3)
+- **My first summary missed things:** Phase 1 built test **data** (not tests); the 941 vs register conflict is the *effect* of the missing employee, not a separate error; I forgot #4 (blurry scan), the seed, the golden key, the 13 tests, security, and money handling.
+- **Mistake:** PR #2 merged without the `.env.example` fix and the Phase 1 tick. The edits weren't saved → `git add` on an unchanged file does **nothing, silently**, and the commit message claimed a change that wasn't there. Fixed in a follow-up branch + PR #3.
+- Rule: before committing, `git status` must list **every file you expect**.
+- Stuck in `git diff` → it's the pager → press `q`.
+
 **Phase 1 in 60 seconds:** I built a fake "outside world" with a fixed seed so it's identical on every run: 20 employees, Q1/Q2 payroll, an Excel register, Form 941 PDFs, W-2 PDFs, a mock ADP API (key auth, path-traversal safe) and a SQLite payroll database. I planted 4 errors (missing employee, transposed digits, 40% bonus, blurry scan) and generated a golden answer key from the same constants, kept apart from the sources. Tests lock in the answers, the API security and the database contents.
+
+---
+
+## Phase 2: Ingestion
+
+**Goal:** one command (`uv run taxagent ingest --quarter 2026Q2`) fetches every document from ADP and the SQL DB, and stores it **safely with proof**. Zero-touch: no manual downloads.
+
+```
+Mock ADP API ─┐
+              ├─→ fetch → hash (SHA-256) → save to data/raw/<quarter>/ → manifest row
+SQLite DB  ───┘
+```
+
+| Idea | Meaning | Why |
+|---|---|---|
+| **Raw zone** | `data/raw/<quarter>/`: untouched copy of what we received | Evidence; all later steps work from it |
+| **Write-once** | a stored file is never overwritten | proves the analyzed file = the received file |
+| **Manifest** | one row per file: source, path, SHA-256, size, fetched_at, run_id | the receipt for auditors |
+| **run_id** | unique ID per ingestion run | "which run brought this file in?" |
+
+- Code now lives in `src/taxagent/ingestion/`: the **real product** for the first time (Phase 1 was the fake world).
+- Branch: `git switch -c phase-2-ingestion`
+
+### Design question: re-running ingestion when 1 of 24 files changed
+- My answer: unchanged files stay as they are (the hash detects duplicates); the changed file doesn't overwrite the original but sits **next to it** as a new version → **lineage** and future audits.
+- Refinements: the hash **detects** the duplicate, the code **decides** to skip it (prevention vs detection). A changed document is itself a **finding** (amended 941?) → alert the analyst; every analysis records **which version** it used.
+- Design = **content-addressed storage**: file name starts with its hash (`3f2a9c1b7d4e_form_941_2026Q2.pdf`). Same content → same name → skip. New content → new name → keep both.
+
+### Step 1: Raw store (`src/taxagent/ingestion/raw_store.py`), built test-first
+**What:** `store_raw(content, name, quarter)` saves bytes to `data/raw/<quarter>/<hash[:12]>_<name>`, read-only, never overwriting. Returns a frozen `StoredFile(path, sha256, size_bytes, is_new)`. 6 tests in `tests/test_raw_store.py` → **19 passed** total.
+
+**TDD (test-driven development):** write tests first → run → watch them **fail** (`ModuleNotFoundError`) → write code until they pass. Tests = the specification.
+
+**How `store_raw` decides:**
+- `path.exists()` → "have we seen this **content** before?" (the hash is in the name). No → save, `is_new=True`.
+- Yes → re-hash the file **on disk**: `!= digest` → "has our stored copy been **tampered** with?" Match → `is_new=False` (skip). Mismatch → `TamperedFileError`.
+- A new version never reaches the tamper check: different content → different path.
+
+**Learned:**
+- `hashlib.sha256(b).hexdigest()` = 64 hex chars; 12 in the file name, all 64 in the manifest.
+- `open("xb")`: `x` = exclusive create (fails if the file exists) → write-once enforced by Python itself.
+- `chmod(0o444)` = read-only. `frozen=True` dataclass = can't be changed after creation (a receipt shouldn't be editable).
+- Own error type `class TamperedFileError(Exception)` → callers can catch that specific problem.
+- Names from outside are untrusted → reject any name containing a path (path traversal again).
+- `with pytest.raises(X):` = the code inside **must** raise X → how you test that something is blocked.
+- **Mistake:** I thought `chmod(0o644)` in the test was about making files immutable. It's the opposite: the test plays the **attacker** and undoes read-only in one line.
+- → **Read-only is a speed bump, not a wall** (prevents accidents only). The **hash check detects** any edit, however it was done. Production: Azure **immutable blob storage (WORM, Write Once Read Many)**, where even admins can't change files until retention ends.
