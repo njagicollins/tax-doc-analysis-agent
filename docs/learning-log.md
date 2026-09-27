@@ -508,4 +508,141 @@ uv run uvicorn mock_sources.adp_api:app --reload   # keep this terminal open
 
 **✅ Phase 1 complete.**
 
+### Phase 1 wrap-up (PRs #2 and #3)
+- **My first summary missed things:** Phase 1 built test **data** (not tests); the 941 vs register conflict is the *effect* of the missing employee, not a separate error; I forgot #4 (blurry scan), the seed, the golden key, the 13 tests, security, and money handling.
+- **Mistake:** PR #2 merged without the `.env.example` fix and the Phase 1 tick. The edits weren't saved → `git add` on an unchanged file does **nothing, silently**, and the commit message claimed a change that wasn't there. Fixed in a follow-up branch + PR #3.
+- Rule: before committing, `git status` must list **every file you expect**.
+- Stuck in `git diff` → it's the pager → press `q`.
+
 **Phase 1 in 60 seconds:** I built a fake "outside world" with a fixed seed so it's identical on every run: 20 employees, Q1/Q2 payroll, an Excel register, Form 941 PDFs, W-2 PDFs, a mock ADP API (key auth, path-traversal safe) and a SQLite payroll database. I planted 4 errors (missing employee, transposed digits, 40% bonus, blurry scan) and generated a golden answer key from the same constants, kept apart from the sources. Tests lock in the answers, the API security and the database contents.
+
+---
+
+## Phase 2: Ingestion
+
+**Goal:** one command (`uv run taxagent ingest --quarter 2026Q2`) fetches every document from ADP and the SQL DB, and stores it **safely with proof**. Zero-touch: no manual downloads.
+
+```
+Mock ADP API ─┐
+              ├─→ fetch → hash (SHA-256) → save to data/raw/<quarter>/ → manifest row
+SQLite DB  ───┘
+```
+
+| Idea | Meaning | Why |
+|---|---|---|
+| **Raw zone** | `data/raw/<quarter>/`: untouched copy of what we received | Evidence; all later steps work from it |
+| **Write-once** | a stored file is never overwritten | proves the analyzed file = the received file |
+| **Manifest** | one row per file: source, path, SHA-256, size, fetched_at, run_id | the receipt for auditors |
+| **run_id** | unique ID per ingestion run | "which run brought this file in?" |
+
+- Code now lives in `src/taxagent/ingestion/`: the **real product** for the first time (Phase 1 was the fake world).
+- Branch: `git switch -c phase-2-ingestion`
+
+### Design question: re-running ingestion when 1 of 24 files changed
+- My answer: unchanged files stay as they are (the hash detects duplicates); the changed file doesn't overwrite the original but sits **next to it** as a new version → **lineage** and future audits.
+- Refinements: the hash **detects** the duplicate, the code **decides** to skip it (prevention vs detection). A changed document is itself a **finding** (amended 941?) → alert the analyst; every analysis records **which version** it used.
+- Design = **content-addressed storage**: file name starts with its hash (`3f2a9c1b7d4e_form_941_2026Q2.pdf`). Same content → same name → skip. New content → new name → keep both.
+
+### Step 1: Raw store (`src/taxagent/ingestion/raw_store.py`), built test-first
+**What:** `store_raw(content, name, quarter)` saves bytes to `data/raw/<quarter>/<hash[:12]>_<name>`, read-only, never overwriting. Returns a frozen `StoredFile(path, sha256, size_bytes, is_new)`. 6 tests in `tests/test_raw_store.py` → **19 passed** total.
+
+**TDD (test-driven development):** write tests first → run → watch them **fail** (`ModuleNotFoundError`) → write code until they pass. Tests = the specification.
+
+**How `store_raw` decides:**
+- `path.exists()` → "have we seen this **content** before?" (the hash is in the name). No → save, `is_new=True`.
+- Yes → re-hash the file **on disk**: `!= digest` → "has our stored copy been **tampered** with?" Match → `is_new=False` (skip). Mismatch → `TamperedFileError`.
+- A new version never reaches the tamper check: different content → different path.
+
+**Learned:**
+- `hashlib.sha256(b).hexdigest()` = 64 hex chars; 12 in the file name, all 64 in the manifest.
+- `open("xb")`: `x` = exclusive create (fails if the file exists) → write-once enforced by Python itself.
+- `chmod(0o444)` = read-only. `frozen=True` dataclass = can't be changed after creation (a receipt shouldn't be editable).
+- Own error type `class TamperedFileError(Exception)` → callers can catch that specific problem.
+- Names from outside are untrusted → reject any name containing a path (path traversal again).
+- `with pytest.raises(X):` = the code inside **must** raise X → how you test that something is blocked.
+- **Mistake:** I thought `chmod(0o644)` in the test was about making files immutable. It's the opposite: the test plays the **attacker** and undoes read-only in one line.
+- → **Read-only is a speed bump, not a wall** (prevents accidents only). The **hash check detects** any edit, however it was done. Production: Azure **immutable blob storage (WORM, Write Once Read Many)**, where even admins can't change files until retention ends.
+
+### Step 2: Manifest (`src/taxagent/ingestion/manifest.py`)
+**What:** `ManifestRow` (run_id, source, name, path, sha256, size_bytes, is_new, fetched_at); `new_run_id()`, `make_row()`, `append_row()`, `read_rows()` → `data/raw/manifest.jsonl`. 4 tests → **23 passed**.
+**Learned:**
+- **JSON Lines (`.jsonl`)** = one JSON object per line. Append new rows at the end, never rewrite old ones (fits an append-only audit log); a crash only affects the last line.
+- `open("a")` = **append** mode.
+- **UTC** everywhere: one clock for all servers; convert to local time only for display.
+- `run_id` = UTC timestamp (readable, sorts by time) + random **UUID** piece (unique even within the same second): `20260927T154217Z-f87b63f1`.
+- `asdict(row)` dataclass → dict; `ManifestRow(**d)` dict → dataclass (`**` unpacks a dict into keyword arguments).
+- `as_posix()` → paths always with `/` (same manifest on any OS). Always pass `encoding="utf-8"` on Windows.
+- **Why log `is_new: false` rows** (I didn't know): "nothing changed" is a fact worth recording. With only new files logged, *missing evidence* and *evidence of no change* look the same. Logging every fetch proves "on Oct 5 we checked again and the 941 was unchanged".
+
+### Step 3: ADP source (`src/taxagent/ingestion/sources.py`)
+**What:**
+- Mock API: `GET /documents?quarter=2026Q2` returns that quarter's docs **plus that year's annual docs** (W-2s), each with a `period`. Parsed from the name with a **regex**.
+- `DocumentSource` **Protocol** + `AdpApiSource.fetch_documents(quarter)` → list of `(name, bytes)`.
+- `httpx2` moved from dev to a real dependency (the product now makes HTTP calls).
+- Tests: `test_sources.py` (quarter filtering, wrong key fails loudly) + updated `test_mock_adp.py` → **26 passed**.
+
+**Learned:**
+- **Protocol** = an interface/contract ("has `name` + `fetch_documents(quarter)`"). Any class following it plugs in → ADP, SQL, Azure are interchangeable (adapter idea in code). `...` = shape only, no body.
+- **Dependency injection:** `AdpApiSource(..., client=...)`. Tests pass FastAPI's `TestClient` → the real client code is tested against the real mock server with **no network**.
+- Real APIs filter on the **server** (query parameter `?quarter=`), not by sending everything.
+- **Regex:** `\d{4}` = 4 digits, `(?:Q[1-4])?` = optional quarter, `(...)` = capture. **Bug caught by tests (in the senior's draft!):** "starts with digits" matched `941` → period "941". A precise pattern fixed it. Tests catch everyone's mistakes.
+- Changing the API broke an old test → good: forced a deliberate update, not an accidental one.
+- `raise_for_status()`: 401/404 → Python error. **Without it** (my answer): the error page gets saved as a "W-2" → hashed, read-only, in the manifest as legitimate evidence; the failure surfaces days later in extraction, far from the cause. = **silent failure**. Crash where the problem happens.
+- `timeout=30` → never wait forever on a dead server.
+- **Import groups** separated by blank lines: standard library → third-party → our own code (ruff I001).
+
+### Step 4: SQL source (`SqlPayrollSource` in `sources.py`)
+**What:** Query the quarter's payroll (JOIN employees for name/SSN) → CSV snapshot `payroll_db_<quarter>.csv` as `(name, bytes)`. 3 tests → **29 passed**.
+**Why:** A database holds rows, not files. Exporting a snapshot means the DB's data at that moment is hashed and preserved like the PDFs.
+**Rules in the code:**
+- **Read-only connection** (`file:...?mode=ro`): ingestion must never change source systems. Enforced by the connection, and a test plays the attacker (swaps the query for a DELETE → must fail).
+- **Deterministic export:** fixed columns, `ORDER BY`, `lineterminator="\n"` → byte-identical CSV each run → hash only changes when data does (otherwise a fake "new version" every day).
+- **JOIN** = pull matching rows from another table (like Excel VLOOKUP). `payroll AS p` = table **alias**.
+
+**Learned:**
+- `(quarter,)` = one-item **tuple**; `(quarter)` is just brackets. Classic gotcha.
+- `[(name, content)] = ...` unpacks **and** asserts exactly one item.
+- `cursor.description` → column names. `io.StringIO()` = in-memory file. Python's csv defaults to `\r\n` line endings.
+- **Why both sources matter** (I didn't know): from outside they're **identical** (`name` + `fetch_documents(quarter)` → `(name, bytes)`); all differences are hidden inside. The pipeline loops over any source without asking which one → new source = one new class; production = swap the source; tests = a tiny fake source. **Code against the shape, not the details.**
+
+### Step 5: Pipeline (`src/taxagent/ingestion/pipeline.py`)
+**What:** `ingest(quarter, sources)` loops over **any** sources → `store_raw` → `append_row` → classifies each document as **new**, **unchanged** or **changed** (same name, different content = a finding for the analyst). Returns `IngestResult(run_id, new, unchanged, changed)`. 3 tests with a `FakeSource` → **32 passed**.
+**Learned:**
+- **Fake / test double:** `FakeSource` follows the same shape as ADP/SQL → the pipeline accepts it → instant tests, no server, no DB. The payoff of the Protocol.
+- `*sources` = collect any number of arguments into a tuple.
+- `glob(f"{'?' * 12}_{name}")`: `?` = exactly one character → finds **any version** of a document. Look for earlier versions **before** storing (else you find the file you just saved).
+- `field(default_factory=list)` → each result gets its **own** list. `= []` would make all results share one list (**mutable default** trap).
+- **Why 2 manifest rows but 1 file** (I didn't know; it's Step 2's idea again): the raw store records **content** (each unique doc once); the manifest records **events** (every fetch). 1 file proves no duplicates; 2 rows prove the second run left evidence of "checked, unchanged". Regression test for the audit trail.
+- Learning tip: when stuck, ask "**which earlier idea is this?**" Core idea here: **store content once, log every event**.
+
+### Step 6: The `taxagent ingest` command (`src/taxagent/cli.py`)
+**What:**
+- `pyproject.toml` → `[project.scripts] taxagent = "taxagent.cli:main"` (this line creates the command). Emptied `src/taxagent/__init__.py`.
+- Settings: `ADP_API_KEY`, `PAYROLL_DB_PATH` (product side). The server keeps `MOCK_ADP_API_KEY`. Locally both keys are `dev-key`; in production only `ADP_API_KEY` exists → no code change.
+- `tests/test_cli.py` (5 tests via `parametrize`) → **37 passed**.
+- Real run (server in terminal 1, command in terminal 2):
+  - Run 1: `23 new, 0 unchanged, 0 changed`
+  - Run 2: `0 new, 23 unchanged, 0 changed` → manifest has **46 rows**.
+
+**Why 23 files?** ADP has 24; Q2 skips the two Q1 docs (941 + register) → 22 (Q2 941, Q2 register, 20 annual W-2s) + 1 SQL snapshot CSV = **23**. Proves the quarter filter works.
+**Why the 2nd run found nothing new:** same ADP files + byte-identical CSV (deterministic export) → same hashes → nothing stored, but 23 more manifest rows (store once, log every event). Without `ORDER BY` we'd get a false "1 changed" every run.
+
+**Learned:**
+- The product must never say "mock": neutral setting names so production is config-only.
+- **argparse** = built-in commands/options; **subcommands** (`ingest`) leave room for `extract`, `review`… (like `git commit`).
+- `type=quarter_arg` validates at the door; regex `^...$` = the **whole** text must match (`2026Q5` rejected).
+- `main(argv=None)`: real runs read the terminal, tests pass a list (dependency injection).
+- `except httpx2.ConnectError` → one clear sentence instead of a 40-line traceback. Still fails (exit code 1), just **readably**.
+- The `sources = [...]` list is the **only** place that knows the concrete sources.
+- `@pytest.mark.parametrize` = run one test for many inputs.
+- Switch VS Code terminals: dropdown / list in the terminal panel, or Ctrl+PageUp/PageDown.
+
+### Commit order mistake
+- **Mistake:** I committed the CLI without the sources/pipeline commits → that commit **imported files not in git** → broken if checked out.
+- Rule: **every commit should work on its own** (any point in history can be checked out and tested).
+- Fix (unpushed, so safe): `git reset --soft HEAD~1` (undo last commit, keep changes staged) → `git restore --staged .` (unstage all, files stay changed) → re-commit in **dependency order**: sources → pipeline → CLI → log.
+- Verified: each commit passes on its own (29 → 32 → 37 tests).
+
+**✅ Phase 2 complete.**
+
+**Phase 2 in 60 seconds:** `uv run taxagent ingest --quarter 2026Q2` pulls every document for a quarter from the ADP API and the SQL database (exported as a deterministic CSV snapshot). Each file is stored write-once and read-only, named by its SHA-256 hash (content-addressed), so duplicates are skipped, changed documents are kept side by side and flagged, and tampering is detected on re-runs. Every fetch is logged in an append-only JSONL manifest with a run ID and UTC timestamp. Sources hide behind one Protocol, so production is a config change, and 37 tests (using fakes, no network) lock it all in.
