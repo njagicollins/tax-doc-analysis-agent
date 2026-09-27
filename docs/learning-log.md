@@ -482,3 +482,30 @@ uv run uvicorn mock_sources.adp_api:app --reload   # keep this terminal open
 - Tests must not need `.env` or `data/` → they pass on **any machine** (fresh clones, CI).
 - **Regression test** (I didn't know this one): the traversal test passes today, but protects the **future**. If someone "simplifies" the code and removes the allow-list, the test fails before the bug reaches `main`. Rule: when you fix a bug or add a protection, add a test that proves it; the test also documents *why* the code exists.
 - **Caught before commit:** `.env.example` still had `MOCK_ADP_API_KEY=dev-key`. Review `git diff` before committing.
+- **…and it got committed anyway.** Fix = a new commit emptying the value. With a **real** secret, a new commit isn't enough (it stays in history) → **revoke the key** immediately.
+
+### Step 10: Payroll SQL database (`mock_sources/seed_db.py`)
+**Concept:**
+- **Database** = tables of rows/columns built for programs; queried with **SQL**.
+- The DB is the **system of record** (complete, correct). The Excel register is an **export** from it, and the export dropped E013. So the DB **includes** E013.
+- **SQLite** = a whole database in **one file**, no server; built into Python (`import sqlite3`). Stands in for the SaaS SQL DB.
+
+**What:**
+- Tables: `employees` (id, name, ssn, salary) and `payroll` (one row per employee per quarter) → `data/sources/sql/payroll.db`.
+- Added `seed_database(employees, lines)` to `synthetic/__main__.py` → one command still builds everything.
+- `tests/test_seed_db.py`: 20 employees / 40 payroll rows; E013 Q1 present (3,750,000 cents); quarter totals. → **13 passed**.
+
+**Result / reasoning:** DB Q1 total = 50,812,500 cents = **$508,125** = the 941, not the register ($470,625) → the **register is the wrong document**.
+- Refinement: "2 of 3 agree" is a **strong hint, not proof** (two sources can share the same mistake). The system suggests; the **analyst confirms** (human-in-the-loop).
+
+**Learned:**
+- **Money as integer cents** in the DB ($37,500.00 → `3750000`): SQLite has no exact decimal. `to_cents()` asserts there are no fractions of a cent.
+- **`?` placeholders**, never glue values into SQL text → prevents **SQL injection** (e.g. a "name" of `'); DROP TABLE employees; --`).
+- **Schema** = table design. **PRIMARY KEY** = unique row ID (`(employee_id, quarter)` → no duplicates). **REFERENCES** = **foreign key** (payroll row must point to a real employee).
+- `commit()` = save permanently. `try/finally` → `finally` always runs → connection always closed (Windows locks open files).
+- SQL basics: `SELECT ... FROM ... WHERE ...`, `COUNT(*)`, `SUM(...)`, `GROUP BY`, `ORDER BY`.
+- ruff sorts imports alphabetically (I001) → `ruff check --fix`.
+
+**✅ Phase 1 complete.**
+
+**Phase 1 in 60 seconds:** I built a fake "outside world" with a fixed seed so it's identical on every run: 20 employees, Q1/Q2 payroll, an Excel register, Form 941 PDFs, W-2 PDFs, a mock ADP API (key auth, path-traversal safe) and a SQLite payroll database. I planted 4 errors (missing employee, transposed digits, 40% bonus, blurry scan) and generated a golden answer key from the same constants, kept apart from the sources. Tests lock in the answers, the API security and the database contents.
