@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx2
 from dotenv import load_dotenv
 
+from taxagent.extraction.run import REVIEW_THRESHOLD, run_extraction
 from taxagent.ingestion.pipeline import ingest
 from taxagent.ingestion.sources import AdpApiSource, SqlPayrollSource
 
@@ -42,6 +43,17 @@ def run_ingest(quarter: str) -> None:
         print(f"  CHANGED since an earlier run: {name}")
 
 
+def run_extract(quarter: str) -> None:
+    result = run_extraction(quarter)
+    print(f"Extracted {len(result.values)} values -> {result.output_path}")
+    print(
+        f"{len(result.needs_review)} need human review (confidence < {REVIEW_THRESHOLD}):"
+    )
+    for value in result.needs_review:
+        who = value.employee_id or "company"
+        print(f"  {value.field:<22} {who:<8} confidence {value.confidence}")
+
+
 def main(argv: list[str] | None = None) -> None:
     load_dotenv()
 
@@ -51,7 +63,13 @@ def main(argv: list[str] | None = None) -> None:
         "ingest", help="Pull a quarter's documents into the raw zone"
     )
     ingest_command.add_argument("--quarter", required=True, type=quarter_arg)
+    extract_command = commands.add_parser(
+        "extract", help="Read every stored document into values with evidence"
+    )
+    extract_command.add_argument("--quarter", required=True, type=quarter_arg)
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
         run_ingest(args.quarter)
+    elif args.command == "extract":
+        run_extract(args.quarter)

@@ -718,3 +718,17 @@ SQLite DB  ───┘
 - The **ID printed on the form beats the file name** (the form is evidence, the name is metadata). Hint only used when the form is unreadable.
 - `scope="module"` fixture = built once per test file. `_` = "don't need this". `*_` in a loop ignores extra items.
 - **Why the extractor returns the wrong number** (I asked for a simple explanation): the extractor is a **witness, not a judge**. It reports exactly what the document says; reconciliation (Phase 4) decides if it's right. If extraction "fixed" typos → the error disappears, a wrong form goes unnoticed, and the `SourceRef` would point at a box that says something else (a lie). **One job per part**: extraction copies faithfully, checking is someone else's job.
+
+### Step 4: SQL snapshot extractor (`src/taxagent/extraction/csv_snapshot.py`)
+**What:** `extract_payroll_snapshot(path, file_sha256)` → one value per cents column, divided by 100 (`3750000` → `37500`, exact with `Decimal`). Confidence 1.0. CSV has no cell names → build Excel-style addresses (column 7, row 2 → `G2`). Fields prefixed `payroll_db.` so every value says which document it came from. 2 tests → **63 passed**.
+**Learned:**
+- `enumerate(reader, start=2)` = count while looping (row 1 is the header). `next(reader)` = take just the first row.
+- `dict(zip(header, row, strict=True))` pairs names with values; `strict=True` crashes on a wrong column count instead of silently dropping data.
+- `get_column_letter(7)` → `"G"` (borrowed from openpyxl).
+- The test builds the CSV the **same way ingestion does** (`SqlPayrollSource`) → proves what ingestion produces, extraction can read.
+- **Mistake:** `ImportError` → the file was **empty (not saved)**, third time. That's also exactly TDD's "watch it fail" error. Fix: turn on **File → Auto Save**.
+- **Why extract the SQL snapshot if the register "has the same data"?** (I wasn't sure; I'd answered it in Phase 1 Step 10.)
+  - With 2 documents that disagree (941 $508,125 vs register $470,625) you can't tell which is wrong.
+  - With 3: 941 = SQL = $508,125, register = $470,625 → register is the odd one out, and E013 is in SQL but not the register.
+  - = **triangulation**: an independent third source identifies which of two is wrong (the analyst still confirms).
+  - "Should contain the same data" is an **assumption**; our job is to **check** assumptions (exports drop rows, copies go stale).
