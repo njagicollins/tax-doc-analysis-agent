@@ -334,3 +334,35 @@ uv run python -c "from faker import Faker; f=Faker(); f.seed_instance(42); print
 - **`Decimal` quotes rule:** whole numbers → `Decimal(0)` (exact, no quotes needed). Fractions → **must** quote: `Decimal(0.1)` inherits float error; `Decimal("0.1")` is exact. ruff flagged `Decimal("0")` (FURB157) → fixed with `ruff check --fix`.
 - Missing `__init__.py` still "worked" (Python **namespace packages**), but add it anyway: tools like pytest can get confused, and it keeps the project consistent.
 - **Slipped through:** `scripts/check_openai.py` reached `main` unformatted. I'd run `ruff check` (mistakes) but not `ruff format --check` (layout); they're different commands. Real fix = automation: GitHub Actions runs checks on every PR (Phase 8).
+
+### Checkpoint commits
+- Committed in 3 small pieces, naming files explicitly: format fix / generators (+ `pyproject.toml` + `uv.lock` for faker) / learning log.
+- **Mistake:** only 1 of 3 commits happened at first (I hadn't run `ruff format`, so there was nothing to commit). Always confirm with `git status` / `git log`: check what *actually* happened.
+- `LF will be replaced by CRLF` warning = Windows vs Mac/Linux line endings; harmless.
+- Commit each small working step, so there's always a known-good point to return to.
+
+### Step 5: Payroll register in Excel (`synthetic/register.py`)
+**Design decision:** separate the planted errors so each problem has **one cause**:
+
+| # | Error | Quarter | Planted in | Caught by |
+|---|---|---|---|---|
+| 1 | Register ≠ 941 (typo in 941) | Q2 | 941 PDF | reconciliation (same quarter, 2 documents) |
+| 2 | E013 missing from register | Q1 | Excel register | reconciliation |
+| 3 | E007 40% bonus jump | Q2 | payroll data | variance (between quarters) |
+| 4 | Blurry PDF | any | one W-2 | low extraction confidence |
+
+#3 isn't really an *error*: the bonus was genuinely paid. The system flags it as **unusual**; the explanation makes it acceptable. Telling "wrong" from "unusual but valid" is the analyst's job.
+
+**What:** `uv add openpyxl`; `write_register()` writes `data/sources/adp/payroll_register_<quarter>.xlsx`: title row, blank row, headers on row 3, one row per employee, bold TOTAL row, money format `#,##0.00`. Skips E013 in Q1 (**planted error #2**, named constants).
+**Result:** Q1 has 19 employee rows (E013 missing); Q2 has all 20.
+Sanity check: Q2 total $519,475 − Q1 total $470,625 = $48,850 = $37,500 (E013's missing quarter) + $11,350 (E007's bonus). ✅
+
+**Learned:**
+- `-m` = run as a **module** (dotted name, not a file path). Python starts looking from the project root, so `from synthetic.employees import ...` works. With a file path it starts inside `synthetic/` → `ModuleNotFoundError`.
+- `Path`: modern file paths, works on any OS; `folder / "file.xlsx"` joins them. `mkdir(parents=True, exist_ok=True)` = create folders, no error if they exist.
+- **List comprehension**: `[x for x in items if condition]` = filtered list in one line.
+- `getattr(line, "bonus")` = `line.bonus`, with the field name from a variable.
+- Real Excel exports have titles, so headers aren't on row 1; the extractor must handle that.
+- On Windows, an Excel file open in Excel is **locked** → close it before rerunning (else `PermissionError`).
+- **Excel has no Decimal type**: numbers come back as `int`/`float`. Phase 3 must convert them back to `Decimal` carefully.
+- ruff format: lines max 88 characters. Run `ruff check` + `ruff format` before every commit.
