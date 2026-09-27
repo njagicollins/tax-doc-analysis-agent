@@ -573,3 +573,44 @@ SQLite DB  ───┘
 - `asdict(row)` dataclass → dict; `ManifestRow(**d)` dict → dataclass (`**` unpacks a dict into keyword arguments).
 - `as_posix()` → paths always with `/` (same manifest on any OS). Always pass `encoding="utf-8"` on Windows.
 - **Why log `is_new: false` rows** (I didn't know): "nothing changed" is a fact worth recording. With only new files logged, *missing evidence* and *evidence of no change* look the same. Logging every fetch proves "on Oct 5 we checked again and the 941 was unchanged".
+
+### Step 3: ADP source (`src/taxagent/ingestion/sources.py`)
+**What:**
+- Mock API: `GET /documents?quarter=2026Q2` returns that quarter's docs **plus that year's annual docs** (W-2s), each with a `period`. Parsed from the name with a **regex**.
+- `DocumentSource` **Protocol** + `AdpApiSource.fetch_documents(quarter)` → list of `(name, bytes)`.
+- `httpx2` moved from dev to a real dependency (the product now makes HTTP calls).
+- Tests: `test_sources.py` (quarter filtering, wrong key fails loudly) + updated `test_mock_adp.py` → **26 passed**.
+
+**Learned:**
+- **Protocol** = an interface/contract ("has `name` + `fetch_documents(quarter)`"). Any class following it plugs in → ADP, SQL, Azure are interchangeable (adapter idea in code). `...` = shape only, no body.
+- **Dependency injection:** `AdpApiSource(..., client=...)`. Tests pass FastAPI's `TestClient` → the real client code is tested against the real mock server with **no network**.
+- Real APIs filter on the **server** (query parameter `?quarter=`), not by sending everything.
+- **Regex:** `\d{4}` = 4 digits, `(?:Q[1-4])?` = optional quarter, `(...)` = capture. **Bug caught by tests (in the senior's draft!):** "starts with digits" matched `941` → period "941". A precise pattern fixed it. Tests catch everyone's mistakes.
+- Changing the API broke an old test → good: forced a deliberate update, not an accidental one.
+- `raise_for_status()`: 401/404 → Python error. **Without it** (my answer): the error page gets saved as a "W-2" → hashed, read-only, in the manifest as legitimate evidence; the failure surfaces days later in extraction, far from the cause. = **silent failure**. Crash where the problem happens.
+- `timeout=30` → never wait forever on a dead server.
+- **Import groups** separated by blank lines: standard library → third-party → our own code (ruff I001).
+
+### Step 4: SQL source (`SqlPayrollSource` in `sources.py`)
+**What:** Query the quarter's payroll (JOIN employees for name/SSN) → CSV snapshot `payroll_db_<quarter>.csv` as `(name, bytes)`. 3 tests → **29 passed**.
+**Why:** A database holds rows, not files. Exporting a snapshot means the DB's data at that moment is hashed and preserved like the PDFs.
+**Rules in the code:**
+- **Read-only connection** (`file:...?mode=ro`): ingestion must never change source systems. Enforced by the connection, and a test plays the attacker (swaps the query for a DELETE → must fail).
+- **Deterministic export:** fixed columns, `ORDER BY`, `lineterminator="\n"` → byte-identical CSV each run → hash only changes when data does (otherwise a fake "new version" every day).
+- **JOIN** = pull matching rows from another table (like Excel VLOOKUP). `payroll AS p` = table **alias**.
+
+**Learned:**
+- `(quarter,)` = one-item **tuple**; `(quarter)` is just brackets. Classic gotcha.
+- `[(name, content)] = ...` unpacks **and** asserts exactly one item.
+- `cursor.description` → column names. `io.StringIO()` = in-memory file. Python's csv defaults to `\r\n` line endings.
+- **Why both sources matter** (I didn't know): from outside they're **identical** (`name` + `fetch_documents(quarter)` → `(name, bytes)`); all differences are hidden inside. The pipeline loops over any source without asking which one → new source = one new class; production = swap the source; tests = a tiny fake source. **Code against the shape, not the details.**
+
+### Step 5: Pipeline (`src/taxagent/ingestion/pipeline.py`)
+**What:** `ingest(quarter, sources)` loops over **any** sources → `store_raw` → `append_row` → classifies each document as **new**, **unchanged** or **changed** (same name, different content = a finding for the analyst). Returns `IngestResult(run_id, new, unchanged, changed)`. 3 tests with a `FakeSource` → **32 passed**.
+**Learned:**
+- **Fake / test double:** `FakeSource` follows the same shape as ADP/SQL → the pipeline accepts it → instant tests, no server, no DB. The payoff of the Protocol.
+- `*sources` = collect any number of arguments into a tuple.
+- `glob(f"{'?' * 12}_{name}")`: `?` = exactly one character → finds **any version** of a document. Look for earlier versions **before** storing (else you find the file you just saved).
+- `field(default_factory=list)` → each result gets its **own** list. `= []` would make all results share one list (**mutable default** trap).
+- **Why 2 manifest rows but 1 file** (I didn't know; it's Step 2's idea again): the raw store records **content** (each unique doc once); the manifest records **events** (every fetch). 1 file proves no duplicates; 2 rows prove the second run left evidence of "checked, unchanged". Regression test for the audit trail.
+- Learning tip: when stuck, ask "**which earlier idea is this?**" Core idea here: **store content once, log every event**.
