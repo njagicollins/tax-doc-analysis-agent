@@ -7,6 +7,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from mock_sources.seed_db import seed_database
 from synthetic.employees import SEED, generate_employees
 from synthetic.form941 import TYPO_QUARTER, compute_941, write_941
 from synthetic.payroll import (
@@ -101,6 +102,8 @@ def main() -> None:
         write_941(quarter, compute_941(quarter, lines))
     for e in employees:
         write_w2(e, compute_w2(e.employee_id, lines))
+
+    seed_database(employees, lines)
 
     GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     GOLDEN_PATH.write_text(json.dumps(build_golden(lines), indent=2))
