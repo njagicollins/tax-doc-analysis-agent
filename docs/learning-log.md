@@ -783,3 +783,14 @@ SQLite DB  ───┘
 - Specifics: $1,000 would **miss #1** (the $270 typo). $0 → **penny false alarms**: SS tax rounded per employee (20 roundings) vs the 941 multiplying the total once → a few cents apart with no error (real Form 941 has line 7, "fractions of cents").
 - Tolerance depends on the check: wages = exact sums (tight); taxes = rounding along the way (small cushion).
 - We use **$1.00**. Thresholds are **business decisions**, tuned on real data. Analysts care more about **recall** (never miss a real error) than precision (a few extra alerts).
+
+### Step 1: Traced amounts (`src/taxagent/compute/traced.py`)
+**What:** `Traced(value, sources)`; `traced(extracted)` and `total(values)`, which add values **and keep every source**. Unreadable value → `UnreadableValueError("w2.box_1 for E017 could not be read")`. 4 tests → **75 passed**.
+**Learned:**
+- The `None` lesson pays off: our own clear error (what + who) instead of Python's vague `TypeError`.
+- `pytest.raises(..., match="E017")` also checks the error **message**. Useful errors say what and where.
+- `sum(..., Decimal(0))`: second argument = **starting value** (default is int `0`).
+- Nested comprehension `for p in parts for s in p.sources` flattens a list of lists.
+- Test helpers (`value(...)`) keep tests short.
+- **Why a tuple, not a list** (my answer: list is mutable, tuple immutable). Concretely: `frozen=True` blocks `t.sources = []` but **not** `t.sources.append(fake)` or `.clear()` → evidence could be silently faked or deleted. Tuples have no `append`/`clear`.
+- Lesson: **"frozen" is only as strong as its weakest part**; freezing the box doesn't freeze its contents (same shape as "read-only is a speed bump").
