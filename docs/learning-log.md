@@ -223,3 +223,114 @@ Cleanup: `git switch main && git pull && git branch -d phase-0-setup && git push
 - After merging: update local `main` (`git pull`), delete the branch locally (`-d`) and on GitHub (`push origin --delete`).
 
 **✅ Phase 0 complete.**
+
+**Phase 0 in 60 seconds:** I set up a Python 3.11 project with uv (exact versions pinned in `uv.lock`), kept secrets out of git with `.env` + `.gitignore`, created one package folder per architecture layer, added pytest (does the code work?) and ruff (is the code clean?), confirmed the OpenAI key works with the model name read from config, and merged it all through a pull request.
+
+### After merging: cleanup and new branch
+**What:**
+```bash
+git stash                 # shelve uncommitted edits
+git switch main
+git pull
+git stash pop             # bring edits back
+git branch -d phase-0-setup
+git push origin --delete phase-0-setup
+git switch -c phase-1-synthetic-data
+git commit -m "Add step 9 to learning log"
+```
+**Learned:**
+- `git switch main` failed: I had uncommitted edits to a file that didn't exist on my (outdated) local `main`. Git **refused to protect my work**, not a bug.
+- `git stash` = put uncommitted changes on a temporary shelf; `git stash pop` = take them back. Pop **after** pull so the file exists first.
+- `git checkout` (old, does many jobs) vs `git switch` (new, only switches branches).
+- Why delete merged branches: job done, less clutter, avoid working on stale branches. Commits and the PR stay forever. `-d` refuses to delete unmerged work; `-D` forces.
+- Stuck terminal escapes: Vim (`~` lines) → `Esc` then `:q!`; `>` prompt (unclosed quote) → `Ctrl+C`; `:` or `(END)` (pager) → `q`.
+
+---
+
+## Phase 1: Synthetic data + mock sources
+
+**Where it lives:** `synthetic/` and `mock_sources/`, top-level, **outside `src`**. They pretend to be the outside world (employees' documents, ADP, the SQL database). In production they'd be deleted; `src/taxagent` shouldn't know it's talking to a fake.
+
+**What we generate:** ~20 fake employees, Q1 + Q2: payroll register (Excel), Form 941 (PDF), W-2s (PDF).
+
+**Planted errors (the golden set):**
+1. Register wages ≠ 941 wages in Q2
+2. One employee missing from the register
+3. 40% quarter-over-quarter jump caused by a bonus
+4. One blurry, hard-to-read PDF
+
+### Why plant errors?
+- My answer: to include edge cases.
+- Main reason: **we know the correct answers, so we can measure the system**. Like an exam with an answer key.
+  - **Recall** = did it find all the real errors? (found 3 of 4 → missed one)
+  - **Precision** = were the things it flagged real errors? (false alarms lower it)
+- **Golden set** = data where the correct answers are known in advance, used to measure accuracy.
+
+### Step 1: Random seeds + Faker
+**What:**
+```bash
+uv add faker
+uv run python -c "from faker import Faker; f=Faker(); f.seed_instance(42); print(f.name(), f.ssn())"
+# seed 42 → Allison Hill 229-18-1680 (same every run)
+# seed 7  → Chris Curtis 075-69-1543
+```
+**Why:** Same seed → identical data every run → the golden answers never change (reproducibility).
+**Learned:**
+- **Seed** = starting number for "random" generation. Same seed = same output.
+- **Faker** makes realistic fake names, SSNs, addresses: right format, not real people.
+- `python -c "..."` runs a small piece of Python straight from the terminal.
+- `$` prompt = Bash (git, uv, cd). `>>>` prompt = Python REPL (`uv run python` to enter, `exit()` to leave).
+
+### Step 2: Generate employees (`synthetic/employees.py`)
+**What:** An `Employee` dataclass (`employee_id`, `name`, `ssn`, `annual_salary`) and `generate_employees(count=20, seed=42)`, which uses Faker with a fixed seed. Salaries: 45,000–150,000 in steps of 500. Ran `uv run python synthetic/employees.py` twice → identical output.
+**Why:** The employees are the base for every document we generate.
+**Learned:**
+- **Never store money as `float`**: `0.1 + 0.2` = `0.30000000000000004`. Use `Decimal` (exact).
+- **SSN is a `str`, not `int`**: leading zeros (`033-04-1536` would become `33041536`), dashes, and you never do math on it. Rule: if you'd never add/average it, it's a string (phones, ZIP codes, IDs).
+- It's a **fixed** seed, not a random one: the fixed starting point that makes the "randomness" repeat.
+- `@dataclass` = a class that just holds data; Python writes the boilerplate.
+- Type hints (`: str`, `-> list[Employee]`) say what type a value should be.
+- `f"E{i:03d}"` → `E001`; `45_000` = 45000 (underscores for readability).
+- `count: int = 20` = **default value**; 20 is small on purpose (enough to hide 4 errors, few enough to check by hand).
+- `if __name__ == "__main__":` runs only when the file is run directly, not when imported.
+- Typo in file name (`employess.py`) → renamed. Name typos cause import errors later.
+
+### Step 3: Payroll basics (domain knowledge)
+**Taxes withheld from each paycheck:**
+
+| Tax | Rate | Notes |
+|---|---|---|
+| Federal income tax | depends on person | we simplify to a flat rate |
+| Social Security | 6.2% | only up to the **wage base** ($176,100/year), a **maximum (cap)** |
+| Medicare | 1.45% | all wages, no cap |
+
+- Social Security + Medicare = **FICA**. The employer pays a **matching** amount on top.
+- **How documents connect:** register (per employee, per quarter) → sum all employees → **Form 941**; register → sum 4 quarters per employee → **W-2**. The system reconciles these; planted errors break them on purpose.
+- Worked example, $30,000 quarter: SS = 30,000 × 6.2% = **$1,860**; Medicare = 30,000 × 1.45% = **$435**; FICA withheld = **$2,295** (+ $2,295 employer match).
+
+**Learned:**
+- **Mistake:** I thought the wage base was a *minimum*. It's a **maximum**: everyone pays 6.2% until year-to-date wages pass $176,100, then SS stops for the rest of the year.
+- **Medicare** (health insurance for 65+, funded by this tax) ≠ **Medicaid** (a different program).
+- Our max salary ($150,000) is below the cap, so no one hits it. The code should still respect the cap: crossing it mid-year is a classic source of payroll errors.
+
+### Step 4: Generate quarterly payroll (`synthetic/payroll.py`)
+**What:**
+- Added `synthetic/__init__.py` (makes `synthetic` a package → `from synthetic.employees import ...`).
+- `PayrollLine` dataclass: `employee_id`, `quarter`, `regular_wages`, `bonus`, `gross_wages`, `federal_tax`, `ss_tax`, `medicare_tax`.
+- `generate_payroll(employees, quarters)`: regular wages = annual salary ÷ 4; federal 12% (simplified); SS 6.2% respecting the $176,100 cap; Medicare 1.45%.
+- **Planted error #3** as named constants at the top: `E007` gets a 40% bonus in `2026Q2`.
+- Ran with `uv run python -m synthetic.payroll`.
+
+**Result:**
+- E001: Q1 $31,625 → Q2 $31,625 (stable, normal).
+- E007: Q1 $28,375 → Q2 $39,725 (bonus $11,350 = exactly 40%). ✅ planted error works.
+
+**Learned:**
+- `money()` rounds to cents with `ROUND_HALF_UP` (0.005 → 0.01, the accountant's way; Python's default rounding differs).
+- `ss_wages_so_far` is a **dictionary** `{employee_id: amount}` tracking year-to-date SS wages → how the cap works.
+- `x if condition else y` = one-line if/else.
+- Planted errors live in **named constants**, not buried in logic, so they're obvious to readers.
+- `python -m package.module` runs a file as a module from the project root, so package imports work.
+- **`Decimal` quotes rule:** whole numbers → `Decimal(0)` (exact, no quotes needed). Fractions → **must** quote: `Decimal(0.1)` inherits float error; `Decimal("0.1")` is exact. ruff flagged `Decimal("0")` (FURB157) → fixed with `ruff check --fix`.
+- Missing `__init__.py` still "worked" (Python **namespace packages**), but add it anyway: tools like pytest can get confused, and it keeps the project consistent.
+- **Slipped through:** `scripts/check_openai.py` reached `main` unformatted. I'd run `ruff check` (mistakes) but not `ruff format --check` (layout); they're different commands. Real fix = automation: GitHub Actions runs checks on every PR (Phase 8).
