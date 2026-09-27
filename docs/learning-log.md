@@ -393,3 +393,18 @@ Sanity check: Q2 total $519,475 − Q1 total $470,625 = $48,850 = $37,500 (E013'
 - PDF coordinates: `(x, y)` in **points** (1/72 inch) from the **top-left**; US Letter = 612 × 792. These positions become the bounding box in `SourceRef` later.
 - `f"{value:,.2f}"` → `519,745.00` (thousands commas, 2 decimals).
 - `assert` in code as a safety check: if the swap changed nothing, stop loudly instead of silently planting nothing.
+
+### Step 7: W-2s + blurry scan (`synthetic/w2.py`)
+**Design problem:** a W-2 covers a full year; we only have Q1 + Q2. **Simplification:** W-2s are built from Q1 + Q2 only ("year-to-date"). Written down in the code. Rule: simplifying is fine if you **document** it ("we simplified X because Y; in production Z").
+
+**W-2 boxes:** 1 wages · 2 federal tax · 3/4 SS wages/tax (6.2%) · 5/6 Medicare wages/tax (1.45%). Each must match the sum of the employee's register rows.
+
+**What:** `compute_w2()` sums an employee's payroll lines; `draw_w2()` writes the form → `data/sources/adp/w2_2026_<id>.pdf` (20 files).
+**Planted error #4:** E017's W-2 is turned into a 40 DPI image (`get_pixmap(dpi=40)` → `insert_image` into an empty PDF) = a fake low-quality scan.
+**Result:** 24 files total (2 registers + 2 941s + 20 W-2s). E001 is clear; E017 is blurry and unreadable.
+
+**Learned:**
+- **Text layer vs scan:** a normal PDF stores real characters with positions → PyMuPDF reads them exactly (selectable with the mouse). A scan is only **pixels** → PyMuPDF finds **zero** text, even if the scan is sharp.
+- **OCR** (Optical Character Recognition) guesses characters from pixels. Blur makes OCR guess wrong (8 vs 3) → **low confidence** → human review.
+- Design: **text layer → trust it; scan → OCR + confidence → human checks low-confidence values.** Production: Azure Document Intelligence does OCR with per-field confidence.
+- **DPI** = dots per inch; normal scan 200–300, ours 40 (blurry on purpose).
