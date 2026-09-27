@@ -1,3 +1,4 @@
+
 # Engineering Guide
 
 The goals, design rules and conventions for this project, plus where the build currently stands. See `docs/architecture.md` for the full design and `docs/plan.md` for the build plan.
@@ -76,7 +77,7 @@ docs/                 architecture.md, plan.md
 ## Current status
 
 - [X] Phase 0: repo setup
-- [ ] Phase 1: synthetic data + mock sources
+- [X] Phase 1: synthetic data + mock sources
 - [ ] Phase 2: ingestion
 - [ ] Phase 3: extraction + schema
 - [ ] Phase 4: deterministic compute
