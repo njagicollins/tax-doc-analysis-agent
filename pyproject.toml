@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "faker>=40.39.0",
     "openai>=3.19.2",
     "python-dotenv>=1.2.3",
 ]
