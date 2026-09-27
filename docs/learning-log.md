@@ -408,3 +408,32 @@ Sanity check: Q2 total $519,475 − Q1 total $470,625 = $48,850 = $37,500 (E013'
 - **OCR** (Optical Character Recognition) guesses characters from pixels. Blur makes OCR guess wrong (8 vs 3) → **low confidence** → human review.
 - Design: **text layer → trust it; scan → OCR + confidence → human checks low-confidence values.** Production: Azure Document Intelligence does OCR with per-field confidence.
 - **DPI** = dots per inch; normal scan 200–300, ours 40 (blurry on purpose).
+
+### Step 8: One command + golden answer key (`synthetic/__main__.py`)
+**What:**
+```bash
+rm -rf data/                 # start from nothing
+uv run python -m synthetic   # → 24 source files + data/golden/golden.json
+```
+`golden.json` lists the 4 planted errors with expected values: #1 difference `270.00` (true 519,475.00 vs reported 519,745.00), #2 E013 `37500.00`, #3 E007 `40.00`%, #4 `w2_2026_E017.pdf`. Matched my hand checks exactly.
+
+**Why:**
+- One command → a new teammate doesn't need to know the order of scripts.
+- `__main__.py` inside a package runs on `python -m <package>`.
+- Answer key is **computed from the same constants** that plant the errors → **one source of truth** (change the bonus → the key updates).
+- Answer key lives in `data/golden/`, **apart from** `data/sources/`: the system must never see the answers.
+
+**Learned:**
+- `rm -rf data/` deletes only the **output**. The errors live in the **code** (recipe), committed in git. Fixed seed → rebuilt identically.
+- Deleting and rebuilding proves the command builds **everything** from nothing (no leftover file hiding a missing step).
+- `rm -rf` has **no undo**: double-check the path.
+- Docstring `"""..."""` explains a file/function. `str | None = None` = "a string or nothing" (optional argument).
+- JSON has no Decimal → store money as strings. `json.dumps(obj, indent=2)` = readable JSON.
+
+### Step 8b: Turn the hand-check into tests (`tests/test_synthetic.py`)
+**What:** 3 tests: same seed → same employees (dataclasses compare with `==`); golden values are exactly 270.00 / 37500.00 / 40.00 / E017; typo difference `% 9 == 0`. `uv run pytest -v` → **4 passed**.
+**Learned:**
+- If you check something by hand, ask: **should this be a test?** A test repeats the check forever and catches someone breaking it later.
+- Tests go **one file per topic** in `tests/`; pytest finds every `test_*.py`.
+- Test the **calculations**, not file writing → fast tests.
+- `%` = modulo (remainder). `x % 9 == 0` = divides evenly by 9.
