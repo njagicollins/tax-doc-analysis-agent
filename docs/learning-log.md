@@ -366,3 +366,30 @@ Sanity check: Q2 total $519,475 − Q1 total $470,625 = $48,850 = $37,500 (E013'
 - On Windows, an Excel file open in Excel is **locked** → close it before rerunning (else `PermissionError`).
 - **Excel has no Decimal type**: numbers come back as `int`/`float`. Phase 3 must convert them back to `Decimal` carefully.
 - ruff format: lines max 88 characters. Run `ruff check` + `ruff format` before every commit.
+
+### Step 6: Form 941 PDF (`synthetic/form941.py`)
+**Domain:** the 941 = the company's quarterly report to the IRS. Lines we use: 1 (employee count), 2 (wages), 3 (federal tax withheld), 5a (SS wages × **12.4%**), 5c (Medicare wages × **2.9%**), 5e (5a + 5c tax), 6 (total taxes = 3 + 5e).
+- 12.4% / 2.9% because the 941 reports **both halves**: employee share + employer match.
+
+**What:**
+- Added `ss_wages` to `PayrollLine` (line 5a needs it; we computed it but threw it away). Designs evolve.
+- `uv add pymupdf` (writes PDFs now, reads them in Phase 3).
+- `compute_941()` sums **all** payroll lines (including E013); `write_941()` draws the form with PyMuPDF → `data/sources/adp/form_941_<quarter>.pdf`.
+- **Planted error #1:** `transpose_digits()` swaps two digits on Q2 line 2: real 519,475.00 → typed **519,745.00**.
+
+**Results:**
+
+| Comparison | Numbers | Explained by |
+|---|---|---|
+| Q1: 941 vs register (reconciliation) | 508,125 − 470,625 = **37,500** | #2 E013 missing from register |
+| Q2: 941 vs register (reconciliation) | 519,745 − 519,475 = **270** | #1 typo |
+| 941: Q2 vs Q1 (variance) | 519,745 − 508,125 = **11,620** | #3 bonus 11,350 **+** #1 typo 270 |
+
+**Learned:**
+- **Transposition trick:** swapped digits → the difference is always divisible by 9 (270 ÷ 9 = 30).
+- **Reconciliation** = same quarter, different documents. **Variance** = same document, different quarters.
+- The typo **hides inside** the variance: looking at variance alone, all 11,620 looks like bonus. Only reconciliation exposes the 270. That's why each error needs a separate cause and why we run both checks.
+- **Mistake:** I compared 941 Q1 vs 941 Q2 instead of 941 Q1 vs register Q1. The register total is in the Excel TOTAL row, Gross Wages column.
+- PDF coordinates: `(x, y)` in **points** (1/72 inch) from the **top-left**; US Letter = 612 × 792. These positions become the bounding box in `SourceRef` later.
+- `f"{value:,.2f}"` → `519,745.00` (thousands commas, 2 decimals).
+- `assert` in code as a safety check: if the swap changed nothing, stop loudly instead of silently planting nothing.
