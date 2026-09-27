@@ -646,3 +646,75 @@ SQLite DB  ───┘
 **✅ Phase 2 complete.**
 
 **Phase 2 in 60 seconds:** `uv run taxagent ingest --quarter 2026Q2` pulls every document for a quarter from the ADP API and the SQL database (exported as a deterministic CSV snapshot). Each file is stored write-once and read-only, named by its SHA-256 hash (content-addressed), so duplicates are skipped, changed documents are kept side by side and flagged, and tampering is detected on re-runs. Every fetch is logged in an append-only JSONL manifest with a run ID and UTC timestamp. Sources hide behind one Protocol, so production is a config change, and 37 tests (using fakes, no network) lock it all in.
+
+---
+
+## Phase 3: Extraction + schema
+
+**Goal:** turn raw files into numbers the system can check, each carrying **proof of where it came from**.
+
+| Idea | Meaning |
+|---|---|
+| **`SourceRef`** | a value's address: file hash + (page + bounding box) for PDFs, or (sheet + cell) for Excel. Principle #1: *can't be traced → can't be used* |
+| **Confidence** | 0–1: how sure we are. Text layer ≈ certain; scan with no text = 0 |
+| **Canonical schema** | one standard shape for every extracted value, whatever file it came from |
+
+- `SourceRef` uses the **file hash, not the name**: names repeat across versions; a hash points to exactly one version, forever.
+- **Pydantic** = like a dataclass but **validates** data on creation (confidence 0–1, page ≥ 1…). Bad data rejected at the door.
+
+### Which is easier to reference precisely: PDF or Excel?
+- **Mistake:** I guessed PDF. It's **Excel**.
+- Excel has **built-in structure**: every value lives at an exact cell (`Register!F4`); openpyxl gives value + address together.
+- A PDF is just "draw text X at position (x, y)". It doesn't know "line 2" exists → we **infer**: find the label, take the number on the same line, record its coordinates. Layout changes can break the guess.
+- A scan has no text at all → nothing to point to without OCR.
+- → Guide rule **"never OCR Excel"**: don't throw away precision the file already has.
+
+| | Excel | PDF (text) | PDF (scan) |
+|---|---|---|---|
+| Address | exact cell, built in | coordinates, inferred | none without OCR |
+| Confidence | very high | high | low / zero |
+
+### What is a schema?
+- A **fixed template** every piece of data must fit (like a shipping label: the warehouse reads the label, not the contents; missing fields → rejected).
+- 941 PDF, W-2 PDFs, Excel register, SQL CSV are all different, but once extracted they **all look the same** → the math never asks "PDF or Excel?". Same trick as the `DocumentSource` Protocol: many inputs, one shape.
+- **Canonical** = the one official version.
+
+### Step 1: Schema (`src/taxagent/schema/models.py`)
+**What:** `uv add pydantic`. `SourceRef` (file_sha256 + page/bbox **or** sheet/cell) and `ExtractedValue` (field, value, confidence, source). 9 tests → **46 passed**. The test names read as a plain-English list of rules.
+**Learned:**
+- `BaseModel` = Pydantic's dataclass with validation. `Field(ge=0, le=1)` = ≥ 0 and ≤ 1. `Field(pattern=...)` = must match a regex (64 hex chars = real SHA-256).
+- `@model_validator` = a rule over **several fields together**: PDF page **or** sheet cell, never neither/both (`in_pdf == in_sheet` catches both bad cases).
+- `frozen=True` → evidence can't be edited after creation. `Self` = "returns this same class".
+- **`None`, not `0`, for unreadable values:**
+  - My answer: 0 is still a number usable in arithmetic; None clearly says "no number here".
+  - Plus: E017 as 0 → W-2 totals **silently wrong** → false mismatch hunted for hours, or a wrong report. As None → `Decimal + None` → `TypeError` → math **refuses** → code is forced to send it to a human first.
+  - Rule: **"unknown" must look different from every real value** ($0 is a real amount).
+
+### Step 2: Excel extractor (`src/taxagent/extraction/excel.py`)
+**What:**
+- Schema: added `employee_id: str | None` to `ExtractedValue` (register values belong to an employee; 941 values to the company).
+- `extract_register(path, file_sha256)` → one `ExtractedValue` per money cell, with `SourceRef(sheet, cell)`. Finds the header row itself; skips blank + TOTAL rows; ignores name/SSN.
+- 10 tests (built on a real register from the synthetic generator) → **56 passed**. Q1: 19 employees × 6 columns = 114 values, E013 absent, E001 gross = 31,625.00 at `F4`.
+
+**Learned:**
+- `to_money()` handles "Excel has no Decimal" (from Phase 1): numbers go **via `str()`** so float errors don't sneak in (`458.56` stays exact).
+- **Confidence** = "how much should we trust this value?", not only "did we read it right?". Real number cell = 1.0; number typed **as text** = 0.9; unreadable = `None` / 0.0.
+- Why text gets 0.9 (my answer: probably typed by a human). Plus: Excel's `=SUM()` **skips text cells** → the file's own total can silently disagree with itself. Likely right, worth a look → a threshold (e.g. 0.95) sends it to review.
+- `MONEY_COLUMNS` maps the file's header names → our canonical names (ADP renames a column → change one line).
+- `data_only=True` = read formula **results**, not formula text. `cell.coordinate` = `"F4"`.
+- The file hash is **passed in**, not recomputed: the raw store already knows it (no duplicate work, no chance to disagree with the manifest).
+- **Set** `{...}` = no duplicates (114 values → 19 employees).
+- Robustness test: insert 2 rows at the top → extractor still works and reports the **new** cell (`F6`). Exports change.
+- **Commit slip again:** Step 1 wasn't committed before Step 2 → committed both in dependency order.
+
+### Step 3: PDF extractor (`src/taxagent/extraction/pdf.py`)
+**What PyMuPDF sees:** no fields, just words with boxes, e.g. `(460.0, 156.2, 515.0, 171.3) '519,745.00'` = (left, top, right, bottom) in points.
+**Strategy:** group words into rows by bottom edge (`round(y1)`) → find the row containing a label → take the numbers on that row → their boxes become the `SourceRef`. Label never found → `None` / 0.0. **Never guess.**
+**Results:** 941 Q2 line 2 = **519,745.00** (typo, read as printed); line 5a has 2 columns (wages 519,475.00 + tax); E007 W-2 box 1 = **68,100.00** (Q1 + Q2 + bonus); E017 scan → all 6 boxes `None`/0.0, ID from file-name hint. 5 tests → **61 passed**.
+**Learned:**
+- `numbers[-len(fields):]` = the **last** N numbers on the row (skips the line number, e.g. `2`; line 5a takes 2).
+- Confidence **0.98**: characters exact (text layer), but which label they belong to is **inferred** from position. Excel = 1.0 (cell address certain).
+- Every expected field always comes back (found or `None`) → review knows exactly what's missing.
+- The **ID printed on the form beats the file name** (the form is evidence, the name is metadata). Hint only used when the form is unreadable.
+- `scope="module"` fixture = built once per test file. `_` = "don't need this". `*_` in a loop ignores extra items.
+- **Why the extractor returns the wrong number** (I asked for a simple explanation): the extractor is a **witness, not a judge**. It reports exactly what the document says; reconciliation (Phase 4) decides if it's right. If extraction "fixed" typos → the error disappears, a wrong form goes unnoticed, and the `SourceRef` would point at a box that says something else (a lie). **One job per part**: extraction copies faithfully, checking is someone else's job.
