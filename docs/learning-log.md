@@ -562,3 +562,14 @@ SQLite DB  ───┘
 - `with pytest.raises(X):` = the code inside **must** raise X → how you test that something is blocked.
 - **Mistake:** I thought `chmod(0o644)` in the test was about making files immutable. It's the opposite: the test plays the **attacker** and undoes read-only in one line.
 - → **Read-only is a speed bump, not a wall** (prevents accidents only). The **hash check detects** any edit, however it was done. Production: Azure **immutable blob storage (WORM, Write Once Read Many)**, where even admins can't change files until retention ends.
+
+### Step 2: Manifest (`src/taxagent/ingestion/manifest.py`)
+**What:** `ManifestRow` (run_id, source, name, path, sha256, size_bytes, is_new, fetched_at); `new_run_id()`, `make_row()`, `append_row()`, `read_rows()` → `data/raw/manifest.jsonl`. 4 tests → **23 passed**.
+**Learned:**
+- **JSON Lines (`.jsonl`)** = one JSON object per line. Append new rows at the end, never rewrite old ones (fits an append-only audit log); a crash only affects the last line.
+- `open("a")` = **append** mode.
+- **UTC** everywhere: one clock for all servers; convert to local time only for display.
+- `run_id` = UTC timestamp (readable, sorts by time) + random **UUID** piece (unique even within the same second): `20260927T154217Z-f87b63f1`.
+- `asdict(row)` dataclass → dict; `ManifestRow(**d)` dict → dataclass (`**` unpacks a dict into keyword arguments).
+- `as_posix()` → paths always with `/` (same manifest on any OS). Always pass `encoding="utf-8"` on Windows.
+- **Why log `is_new: false` rows** (I didn't know): "nothing changed" is a fact worth recording. With only new files logged, *missing evidence* and *evidence of no change* look the same. Logging every fetch proves "on Oct 5 we checked again and the 941 was unchanged".
