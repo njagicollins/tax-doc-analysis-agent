@@ -761,3 +761,25 @@ SQLite DB  ───┘
 **✅ Phase 3 complete.**
 
 **Phase 3 in 60 seconds:** `uv run taxagent extract --quarter 2026Q2` turns every stored document into values in one canonical Pydantic schema, each with a `SourceRef` (file hash + page and bounding box for PDFs, sheet and cell for Excel/CSV) and a confidence score. Excel and CSV are read cell by cell (never OCR'd, confidence 1.0); PDFs are read by finding each label and the numbers on the same row (0.98, because the match is inferred); scans have no text, so their values are `None` with confidence 0, never guessed. Files are re-hashed against the manifest before reading, and anything below 0.95 goes to human review, which caught the blurry W-2 automatically. The extractor reports documents exactly as printed; judging them is Phase 4's job.
+
+---
+
+## Phase 4: Deterministic compute (the judge)
+
+**Goal:** compare extracted values → **exceptions** (problems an analyst must look at). Every result carries the `SourceRef`s of every value it was built from.
+
+| Check | Compares | Catches |
+|---|---|---|
+| **Reconciliation** | same quarter, different documents (941 vs register vs SQL) | #1 typo, #2 missing employee |
+| **Variance** | same document, different quarters (Q1 vs Q2) | #3 bonus jump |
+
+**Ideas:**
+- **Pure function**: output depends **only** on inputs (no files, network, clock, randomness) → same inputs, same answer = **deterministic**. Why the LLM never does math.
+- **Traced amount**: a number that carries its evidence; adding numbers combines their evidence. Guide rule: compute returns `(value, [SourceRef])`.
+- **Tolerance**: how big a difference counts as a real mismatch. **Threshold**: how big a quarter-over-quarter change is "unusual" (e.g. 25%).
+
+### Tolerance question
+- **My answer:** $0 → more escalations (high recall, low precision). $1,000 → miss genuine errors below $1,000 (low recall, higher precision).
+- Specifics: $1,000 would **miss #1** (the $270 typo). $0 → **penny false alarms**: SS tax rounded per employee (20 roundings) vs the 941 multiplying the total once → a few cents apart with no error (real Form 941 has line 7, "fractions of cents").
+- Tolerance depends on the check: wages = exact sums (tight); taxes = rounding along the way (small cushion).
+- We use **$1.00**. Thresholds are **business decisions**, tuned on real data. Analysts care more about **recall** (never miss a real error) than precision (a few extra alerts).
