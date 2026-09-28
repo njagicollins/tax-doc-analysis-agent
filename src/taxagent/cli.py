@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx2
 from dotenv import load_dotenv
 
+from taxagent.compute.run import run_compute
 from taxagent.extraction.run import REVIEW_THRESHOLD, run_extraction
 from taxagent.ingestion.pipeline import ingest
 from taxagent.ingestion.sources import AdpApiSource, SqlPayrollSource
@@ -54,6 +55,21 @@ def run_extract(quarter: str) -> None:
         print(f"  {value.field:<22} {who:<8} confidence {value.confidence}")
 
 
+def run_compute_command(quarter: str) -> None:
+    try:
+        result = run_compute(quarter)
+    except FileNotFoundError as error:
+        raise SystemExit(str(error))
+
+    if result.compared_with:
+        print(f"Compared with {result.compared_with}")
+    else:
+        print("No previous quarter extracted: variance checks skipped")
+    print(f"{len(result.findings)} findings -> {result.output_path}")
+    for finding in result.findings:
+        print(f"  [{finding.kind}] {finding.summary}")
+
+
 def main(argv: list[str] | None = None) -> None:
     load_dotenv()
 
@@ -63,13 +79,21 @@ def main(argv: list[str] | None = None) -> None:
         "ingest", help="Pull a quarter's documents into the raw zone"
     )
     ingest_command.add_argument("--quarter", required=True, type=quarter_arg)
+
     extract_command = commands.add_parser(
         "extract", help="Read every stored document into values with evidence"
     )
     extract_command.add_argument("--quarter", required=True, type=quarter_arg)
+
+    compute_command = commands.add_parser(
+        "compute", help="Reconcile documents and flag unusual changes"
+    )
+    compute_command.add_argument("--quarter", required=True, type=quarter_arg)
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
         run_ingest(args.quarter)
     elif args.command == "extract":
         run_extract(args.quarter)
+    elif args.command == "compute":
+        run_compute_command(args.quarter)

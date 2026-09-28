@@ -809,3 +809,21 @@ SQLite DB  ───┘
 - Constants at the top **and** parameters with defaults → business can tune, tests can override.
 - **Edges (my answer):** exactly 25% → **not** flagged (`>`); exactly $1.00 → **match** (`<=`). ✅
 - **Why decide on purpose:** must match written policy ("over 25%" = `>`); auditors ask "why wasn't 25.00% flagged?"; same answer every quarter (determinism); tests lock it so changes are deliberate. Rule: whenever you write `<` or `<=`, ask **"what happens exactly at the line?"** and put it in a test.
+
+### Step 3: Findings on real data (`src/taxagent/compute/findings.py`)
+**What:** `run_checks(quarter, current, previous=None)` → list of `Finding` (kind, check, quarter, summary, employee_id, difference, change_pct, sources). Four checks: register vs 941; register vs payroll DB; employee lists (missing **and** extra/"ghost"); variance per employee (only with a previous quarter). 4 tests on **real generated + extracted** data → **90 passed**.
+**Results:**
+- **Q1:** 3 findings, all **$37,500**: register vs 941, register vs DB, E013 missing → planted **#2** ✅
+- **Q2:** exactly 2 findings: register vs 941 **$270** → **#1** ✅; E007 **+40.00%** → **#3** ✅
+
+**Learned:**
+- **Finding** = analyst's "exception"; we avoid the word in code (Python `Exception` = error).
+- **Ghost employee** = paid in the register but not in the system of record: a classic payroll-fraud pattern.
+- Set operations on keys: `a.keys() - b.keys()` (in a, not b), `a.keys() & b.keys()` (in both). `sorted()` → stable order every run.
+- Each check does one job: variance skips employees missing from a quarter (the employee-list check reports them) → no double alarm.
+- `summary` is written by **code** (deterministic, exact numbers); the LLM (Phase 5) only explains.
+- `typo, bonus = findings` asserts **exactly 2** → an extra false alarm fails the test (tests **precision**, not just recall).
+- `tmp_path_factory` = module-level `tmp_path`; `pytest.MonkeyPatch.context()` = temporary change inside a `with` block. `{x:+}` = always show the sign.
+- **One error → three findings, a problem?** My answer: no, the 3 findings let the analyst identify the missing row immediately. ✅ (They confirm each other: same $37,500, one names E013 = triangulation.)
+  - Cautions: **alert fatigue** (dozens of alerts → skimming → missed errors) → **group** related findings as one problem (Phase 5 can help).
+  - **Count errors, not alerts** in evals (Phase 7): 3 findings for #2 = **one** error caught.
