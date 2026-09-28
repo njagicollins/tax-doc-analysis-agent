@@ -761,3 +761,99 @@ SQLite DB  ───┘
 **✅ Phase 3 complete.**
 
 **Phase 3 in 60 seconds:** `uv run taxagent extract --quarter 2026Q2` turns every stored document into values in one canonical Pydantic schema, each with a `SourceRef` (file hash + page and bounding box for PDFs, sheet and cell for Excel/CSV) and a confidence score. Excel and CSV are read cell by cell (never OCR'd, confidence 1.0); PDFs are read by finding each label and the numbers on the same row (0.98, because the match is inferred); scans have no text, so their values are `None` with confidence 0, never guessed. Files are re-hashed against the manifest before reading, and anything below 0.95 goes to human review, which caught the blurry W-2 automatically. The extractor reports documents exactly as printed; judging them is Phase 4's job.
+
+---
+
+## Phase 4: Deterministic compute (the judge)
+
+**Goal:** compare extracted values → **exceptions** (problems an analyst must look at). Every result carries the `SourceRef`s of every value it was built from.
+
+| Check | Compares | Catches |
+|---|---|---|
+| **Reconciliation** | same quarter, different documents (941 vs register vs SQL) | #1 typo, #2 missing employee |
+| **Variance** | same document, different quarters (Q1 vs Q2) | #3 bonus jump |
+
+**Ideas:**
+- **Pure function**: output depends **only** on inputs (no files, network, clock, randomness) → same inputs, same answer = **deterministic**. Why the LLM never does math.
+- **Traced amount**: a number that carries its evidence; adding numbers combines their evidence. Guide rule: compute returns `(value, [SourceRef])`.
+- **Tolerance**: how big a difference counts as a real mismatch. **Threshold**: how big a quarter-over-quarter change is "unusual" (e.g. 25%).
+
+### Tolerance question
+- **My answer:** $0 → more escalations (high recall, low precision). $1,000 → miss genuine errors below $1,000 (low recall, higher precision).
+- Specifics: $1,000 would **miss #1** (the $270 typo). $0 → **penny false alarms**: SS tax rounded per employee (20 roundings) vs the 941 multiplying the total once → a few cents apart with no error (real Form 941 has line 7, "fractions of cents").
+- Tolerance depends on the check: wages = exact sums (tight); taxes = rounding along the way (small cushion).
+- We use **$1.00**. Thresholds are **business decisions**, tuned on real data. Analysts care more about **recall** (never miss a real error) than precision (a few extra alerts).
+
+### Step 1: Traced amounts (`src/taxagent/compute/traced.py`)
+**What:** `Traced(value, sources)`; `traced(extracted)` and `total(values)`, which add values **and keep every source**. Unreadable value → `UnreadableValueError("w2.box_1 for E017 could not be read")`. 4 tests → **75 passed**.
+**Learned:**
+- The `None` lesson pays off: our own clear error (what + who) instead of Python's vague `TypeError`.
+- `pytest.raises(..., match="E017")` also checks the error **message**. Useful errors say what and where.
+- `sum(..., Decimal(0))`: second argument = **starting value** (default is int `0`).
+- Nested comprehension `for p in parts for s in p.sources` flattens a list of lists.
+- Test helpers (`value(...)`) keep tests short.
+- **Why a tuple, not a list** (my answer: list is mutable, tuple immutable). Concretely: `frozen=True` blocks `t.sources = []` but **not** `t.sources.append(fake)` or `.clear()` → evidence could be silently faked or deleted. Tuples have no `append`/`clear`.
+- Lesson: **"frozen" is only as strong as its weakest part**; freezing the box doesn't freeze its contents (same shape as "read-only is a speed bump").
+
+### Step 2: Reconciliation + variance (`src/taxagent/compute/checks.py`)
+**What:**
+- `reconcile(check, left, right, tolerance=1.00)` → `Reconciliation(difference = right − left, matches = |difference| <= tolerance)`. Planted typo: 519,475 vs 519,745 → difference **270.00**, mismatch.
+- `variance(check, previous, current, threshold_pct=25)` → `Variance(change, change_pct, flagged = |pct| > 25)`. Planted bonus: 28,375 → 39,725 = **+40.00%**, flagged.
+- 11 tests → **86 passed**.
+
+**Learned:**
+- **Boundary testing:** bugs live at edges (`<` vs `<=` is a one-character bug) → test just below, exactly at, just above, and negative.
+- `abs()`: −$270 is as wrong as +$270; a 50% drop is as unusual as a rise.
+- **Division by zero:** change from $0 has no percentage → `change_pct = None` ("unknown ≠ 0" again), but still **flagged** for a human (new hire? missing row last quarter?).
+- Results keep the whole verdict (both sides + evidence + difference + decision) → Phase 5's LLM explains exceptions from exactly this, citing `sources`.
+- Constants at the top **and** parameters with defaults → business can tune, tests can override.
+- **Edges (my answer):** exactly 25% → **not** flagged (`>`); exactly $1.00 → **match** (`<=`). ✅
+- **Why decide on purpose:** must match written policy ("over 25%" = `>`); auditors ask "why wasn't 25.00% flagged?"; same answer every quarter (determinism); tests lock it so changes are deliberate. Rule: whenever you write `<` or `<=`, ask **"what happens exactly at the line?"** and put it in a test.
+
+### Step 3: Findings on real data (`src/taxagent/compute/findings.py`)
+**What:** `run_checks(quarter, current, previous=None)` → list of `Finding` (kind, check, quarter, summary, employee_id, difference, change_pct, sources). Four checks: register vs 941; register vs payroll DB; employee lists (missing **and** extra/"ghost"); variance per employee (only with a previous quarter). 4 tests on **real generated + extracted** data → **90 passed**.
+**Results:**
+- **Q1:** 3 findings, all **$37,500**: register vs 941, register vs DB, E013 missing → planted **#2** ✅
+- **Q2:** exactly 2 findings: register vs 941 **$270** → **#1** ✅; E007 **+40.00%** → **#3** ✅
+
+**Learned:**
+- **Finding** = analyst's "exception"; we avoid the word in code (Python `Exception` = error).
+- **Ghost employee** = paid in the register but not in the system of record: a classic payroll-fraud pattern.
+- Set operations on keys: `a.keys() - b.keys()` (in a, not b), `a.keys() & b.keys()` (in both). `sorted()` → stable order every run.
+- Each check does one job: variance skips employees missing from a quarter (the employee-list check reports them) → no double alarm.
+- `summary` is written by **code** (deterministic, exact numbers); the LLM (Phase 5) only explains.
+- `typo, bonus = findings` asserts **exactly 2** → an extra false alarm fails the test (tests **precision**, not just recall).
+- `tmp_path_factory` = module-level `tmp_path`; `pytest.MonkeyPatch.context()` = temporary change inside a `with` block. `{x:+}` = always show the sign.
+- **One error → three findings, a problem?** My answer: no, the 3 findings let the analyst identify the missing row immediately. ✅ (They confirm each other: same $37,500, one names E013 = triangulation.)
+  - Cautions: **alert fatigue** (dozens of alerts → skimming → missed errors) → **group** related findings as one problem (Phase 5 can help).
+  - **Count errors, not alerts** in evals (Phase 7): 3 findings for #2 = **one** error caught.
+
+### Step 4: `taxagent compute` (`src/taxagent/compute/run.py`)
+**What:** Loads `data/extracted/<quarter>/values.jsonl` (+ the previous quarter's, if extracted, for variance) → `run_checks` → saves `data/findings/<quarter>/findings.jsonl` → prints each finding. 11 tests → **101 passed**.
+**Real run (both quarters):**
+```
+2026Q1: 3 findings (no previous quarter → variance skipped)
+  [reconciliation] Register 470,625.00 vs Form 941 line 2 508,125.00: difference 37,500.00
+  [reconciliation] Register 470,625.00 vs payroll database 508,125.00: difference 37,500.00
+  [missing_employee] E013 is in the payroll database (37,500.00) but not in the register
+2026Q2: 2 findings (compared with 2026Q1)
+  [reconciliation] Register 519,475.00 vs Form 941 line 2 519,745.00: difference 270.00
+  [variance] E007 gross wages 28,375.00 -> 39,725.00 (+40.00%)
+```
+**All 4 planted errors caught:** #4 in extraction; #1, #2, #3 in compute.
+
+**Learned:**
+- `previous_quarter` edge case: 2026Q1 → **2025Q4** (year boundary).
+- `TypeAdapter(Finding)` → Pydantic saves/loads a plain dataclass (with Decimals + SourceRefs) as JSON.
+- **Helpful errors** say what's wrong **and** how to fix it ("Run: taxagent extract --quarter 2026Q2").
+- Fast tests with tiny hand-made data (3 values) show exactly what's being tested.
+- **Why `run_checks` never touches files** (I didn't know): calculator vs filing clerk.
+  1. **Testing:** hand it a list → instant; otherwise every test must write folders + JSONL first.
+  2. **Reuse:** the agent (Phase 5) and app (Phase 6) pass values from memory/DB/Azure, not our files.
+  3. **Production:** moving to Azure changes only the clerk (`run_compute`); the tax math stays untouched and tested.
+  4. **Determinism:** no hidden inputs (files can be missing, half-written, changed).
+  - Pattern = **"pure core, I/O shell"**: important logic pure in the middle; reading/writing/network in a thin outer layer (sources fetch, raw store writes, extractors + checks transform).
+
+**✅ Phase 4 complete.**
+
+**Phase 4 in 60 seconds:** `uv run taxagent compute --quarter 2026Q2` is the judge. It runs pure, deterministic Python checks over the extracted values: reconciliations (register vs Form 941, register vs payroll database, employee lists including ghost employees) with a $1.00 tolerance, and quarter-over-quarter variance per employee with a 25% threshold. Every number is a traced amount that carries the SourceRefs of every value it was built from, unreadable values make the math refuse rather than guess, and edge cases (exactly $1.00, exactly 25%, division by zero, Q1 → previous year) are decided on purpose and locked in by tests. On real data it catches the typo ($270), the missing employee ($37,500, named E013) and the bonus (+40%). With the blurry scan caught in extraction, all four planted errors are found. No LLM touches the math.
