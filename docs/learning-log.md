@@ -827,3 +827,33 @@ SQLite DB  ───┘
 - **One error → three findings, a problem?** My answer: no, the 3 findings let the analyst identify the missing row immediately. ✅ (They confirm each other: same $37,500, one names E013 = triangulation.)
   - Cautions: **alert fatigue** (dozens of alerts → skimming → missed errors) → **group** related findings as one problem (Phase 5 can help).
   - **Count errors, not alerts** in evals (Phase 7): 3 findings for #2 = **one** error caught.
+
+### Step 4: `taxagent compute` (`src/taxagent/compute/run.py`)
+**What:** Loads `data/extracted/<quarter>/values.jsonl` (+ the previous quarter's, if extracted, for variance) → `run_checks` → saves `data/findings/<quarter>/findings.jsonl` → prints each finding. 11 tests → **101 passed**.
+**Real run (both quarters):**
+```
+2026Q1: 3 findings (no previous quarter → variance skipped)
+  [reconciliation] Register 470,625.00 vs Form 941 line 2 508,125.00: difference 37,500.00
+  [reconciliation] Register 470,625.00 vs payroll database 508,125.00: difference 37,500.00
+  [missing_employee] E013 is in the payroll database (37,500.00) but not in the register
+2026Q2: 2 findings (compared with 2026Q1)
+  [reconciliation] Register 519,475.00 vs Form 941 line 2 519,745.00: difference 270.00
+  [variance] E007 gross wages 28,375.00 -> 39,725.00 (+40.00%)
+```
+**All 4 planted errors caught:** #4 in extraction; #1, #2, #3 in compute.
+
+**Learned:**
+- `previous_quarter` edge case: 2026Q1 → **2025Q4** (year boundary).
+- `TypeAdapter(Finding)` → Pydantic saves/loads a plain dataclass (with Decimals + SourceRefs) as JSON.
+- **Helpful errors** say what's wrong **and** how to fix it ("Run: taxagent extract --quarter 2026Q2").
+- Fast tests with tiny hand-made data (3 values) show exactly what's being tested.
+- **Why `run_checks` never touches files** (I didn't know): calculator vs filing clerk.
+  1. **Testing:** hand it a list → instant; otherwise every test must write folders + JSONL first.
+  2. **Reuse:** the agent (Phase 5) and app (Phase 6) pass values from memory/DB/Azure, not our files.
+  3. **Production:** moving to Azure changes only the clerk (`run_compute`); the tax math stays untouched and tested.
+  4. **Determinism:** no hidden inputs (files can be missing, half-written, changed).
+  - Pattern = **"pure core, I/O shell"**: important logic pure in the middle; reading/writing/network in a thin outer layer (sources fetch, raw store writes, extractors + checks transform).
+
+**✅ Phase 4 complete.**
+
+**Phase 4 in 60 seconds:** `uv run taxagent compute --quarter 2026Q2` is the judge. It runs pure, deterministic Python checks over the extracted values: reconciliations (register vs Form 941, register vs payroll database, employee lists including ghost employees) with a $1.00 tolerance, and quarter-over-quarter variance per employee with a 25% threshold. Every number is a traced amount that carries the SourceRefs of every value it was built from, unreadable values make the math refuse rather than guess, and edge cases (exactly $1.00, exactly 25%, division by zero, Q1 → previous year) are decided on purpose and locked in by tests. On real data it catches the typo ($270), the missing employee ($37,500, named E013) and the bonus (+40%). With the blurry scan caught in extraction, all four planted errors are found. No LLM touches the math.
