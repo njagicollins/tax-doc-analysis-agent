@@ -857,3 +857,31 @@ SQLite DB  ───┘
 **✅ Phase 4 complete.**
 
 **Phase 4 in 60 seconds:** `uv run taxagent compute --quarter 2026Q2` is the judge. It runs pure, deterministic Python checks over the extracted values: reconciliations (register vs Form 941, register vs payroll database, employee lists including ghost employees) with a $1.00 tolerance, and quarter-over-quarter variance per employee with a 25% threshold. Every number is a traced amount that carries the SourceRefs of every value it was built from, unreadable values make the math refuse rather than guess, and edge cases (exactly $1.00, exactly 25%, division by zero, Q1 → previous year) are decided on purpose and locked in by tests. On real data it catches the typo ($270), the missing employee ($37,500, named E013) and the bonus (+40%). With the blurry scan caught in extraction, all four planted errors are found. No LLM touches the math.
+
+- **Slip again:** the "Mark Phase 4 complete" commit didn't include `ENGINEERING_GUIDE.md` (edit not saved) → fixed as the first commit on the Phase 5 branch. Turn on Auto Save.
+
+---
+
+## Phase 5: The LangGraph agent (where AI comes in)
+
+**What the LLM is for:** findings say **what** happened (`E007 +40%`), not **why**. An analyst would open the register, spot the $11,350 bonus line, and write the explanation. The LLM **drafts that explanation**, like a junior analyst. It may **not**: do the math (Phase 4 does), make the decision (a human does), or make claims without citing evidence (we check).
+
+**Workflow:** classify → extract → validate → compute → [PAUSE: human reviews low-confidence values] → explain findings (LLM) → draft summary (LLM) → [PAUSE: human sign-off] → finalize.
+
+| Idea | Meaning |
+|---|---|
+| **LangGraph** | workflows as a **graph** of steps (nodes) with state passed between them |
+| **Interrupt** | workflow **pauses** for a human (possibly days) |
+| **Checkpointer** | saves workflow state to disk (SQLite) → a paused run survives restarts |
+| **PII masking** | replace names/SSNs with placeholders **before** anything reaches the LLM |
+| **Citation validation** | every source the LLM cites must exist in the evidence we gave it |
+| **Versioned prompts** | prompts in files (`explain_finding.v1.md`) → each run records which prompt produced which text |
+
+**Q&A:**
+- **SQLite already built?** Yes and no: Phase 1's `payroll.db` is the **mock source**; the LangGraph **checkpointer** is a different SQLite file, not built yet.
+- **Could it be Redis?** Yes (LangGraph has a Redis checkpointer). SQLite = one file, nothing to run (local/single machine). Redis = separate server, faster, shared by many workers. Staying with SQLite.
+- **Why mask PII even with fake data and a reputable vendor?** My answer: it's PII, it can't reach the LLM. Why:
+  1. Once sent, it's out of our control (logs, backups, support tools, breaches).
+  2. Law/contracts: tax data is regulated; sending SSNs to a third party can be a reportable incident.
+  3. **Data minimisation:** the LLM doesn't need names to explain "E007 +40% due to a bonus".
+  4. Habit: mask **always**; the day someone forgets on real data, it leaks.
