@@ -794,3 +794,18 @@ SQLite DB  ───┘
 - Test helpers (`value(...)`) keep tests short.
 - **Why a tuple, not a list** (my answer: list is mutable, tuple immutable). Concretely: `frozen=True` blocks `t.sources = []` but **not** `t.sources.append(fake)` or `.clear()` → evidence could be silently faked or deleted. Tuples have no `append`/`clear`.
 - Lesson: **"frozen" is only as strong as its weakest part**; freezing the box doesn't freeze its contents (same shape as "read-only is a speed bump").
+
+### Step 2: Reconciliation + variance (`src/taxagent/compute/checks.py`)
+**What:**
+- `reconcile(check, left, right, tolerance=1.00)` → `Reconciliation(difference = right − left, matches = |difference| <= tolerance)`. Planted typo: 519,475 vs 519,745 → difference **270.00**, mismatch.
+- `variance(check, previous, current, threshold_pct=25)` → `Variance(change, change_pct, flagged = |pct| > 25)`. Planted bonus: 28,375 → 39,725 = **+40.00%**, flagged.
+- 11 tests → **86 passed**.
+
+**Learned:**
+- **Boundary testing:** bugs live at edges (`<` vs `<=` is a one-character bug) → test just below, exactly at, just above, and negative.
+- `abs()`: −$270 is as wrong as +$270; a 50% drop is as unusual as a rise.
+- **Division by zero:** change from $0 has no percentage → `change_pct = None` ("unknown ≠ 0" again), but still **flagged** for a human (new hire? missing row last quarter?).
+- Results keep the whole verdict (both sides + evidence + difference + decision) → Phase 5's LLM explains exceptions from exactly this, citing `sources`.
+- Constants at the top **and** parameters with defaults → business can tune, tests can override.
+- **Edges (my answer):** exactly 25% → **not** flagged (`>`); exactly $1.00 → **match** (`<=`). ✅
+- **Why decide on purpose:** must match written policy ("over 25%" = `>`); auditors ask "why wasn't 25.00% flagged?"; same answer every quarter (determinism); tests lock it so changes are deliberate. Rule: whenever you write `<` or `<=`, ask **"what happens exactly at the line?"** and put it in a test.
