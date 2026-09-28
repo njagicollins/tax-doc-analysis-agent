@@ -885,3 +885,16 @@ SQLite DB  ───┘
   2. Law/contracts: tax data is regulated; sending SSNs to a third party can be a reportable incident.
   3. **Data minimisation:** the LLM doesn't need names to explain "E007 +40% due to a bonus".
   4. Habit: mask **always**; the day someone forgets on real data, it leaks.
+
+### Step 1: PII masking (`src/taxagent/agent/pii.py`)
+**What:** `mask(text, roster)`: names → employee IDs (`Patrick Sanchez` → `E001`), SSNs → `[SSN]`. `assert_no_pii(text, roster)`: final guard, raises `PiiLeakError` if an SSN or known name remains. 10 tests (tricky roster: "Ann Lee" inside "Ann Lee-Smith", "Joann Leeds") → **111 passed**.
+**Learned:**
+- Masking is a safety net on **everything** leaving for the LLM (context text can contain PII even if findings don't).
+- **Pseudonymisation:** names → IDs, so the LLM can still say "E007" and humans can look it up. SSNs removed entirely (nothing needs them).
+- Regex `\b` = **word boundary** ("Ann Lee" must not match inside "Joann Leeds"). `re.escape()` makes symbols in names literal. `lambda` = tiny unnamed function (sort longest name first).
+- Error messages **never repeat the PII** (logs would leak it).
+- Honest limit: regex only catches **known** names + the SSN pattern → production adds **NER** / Azure AI Language PII detection.
+- Senior's slip: a Python edit script turned `\b` into an invisible backspace character; **ruff caught it** (another reason for a linter).
+- **Why both `mask()` and `assert_no_pii()`?** My answer: mask = first layer; the guard screams if mask misses PII. ✅ Wording: guard = **detection** that blocks (prevention + detection pair again).
+  - Why mask will miss someday: a bug in it; someone forgets to call it; text appended after masking; slightly different spelling.
+  - = **defence in depth**: independent layers so one failure isn't a breach. The guard only works if **every** LLM call passes through it → one doorway to the LLM (next step).
