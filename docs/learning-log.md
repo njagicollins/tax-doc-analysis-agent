@@ -898,3 +898,59 @@ SQLite DB  ───┘
 - **Why both `mask()` and `assert_no_pii()`?** My answer: mask = first layer; the guard screams if mask misses PII. ✅ Wording: guard = **detection** that blocks (prevention + detection pair again).
   - Why mask will miss someday: a bug in it; someone forgets to call it; text appended after masking; slightly different spelling.
   - = **defence in depth**: independent layers so one failure isn't a breach. The guard only works if **every** LLM call passes through it → one doorway to the LLM (next step).
+
+### Step 2: One doorway to the LLM (`src/taxagent/agent/llm.py`)
+**What:** `LLM.parse(role, instructions, prompt, schema)` is the **only** way the project talks to a model. Every call: (1) passes the **PII guard**, (2) is routed by config (`small` → `MODEL_SMALL` = gpt-4o-mini, `large` → `MODEL_LARGE` = gpt-4o), (3) returns **structured output** (a validated Pydantic object). `llm_from_env()` picks OpenAI or Azure from `LLM_PROVIDER`. 8 tests with a `FakeClient` (no real calls) → **119 passed**. Added empty `AZURE_OPENAI_*` settings to `.env.example`.
+
+**Learned:**
+- **Choke point** = one controlled entry point → no caller can forget the PII guard.
+- **Structured output:** pass a Pydantic class; the model must reply with JSON that fits, validated on the way in → code reads `answer.reason`, never guesses from a paragraph.
+- `instructions` = system role (how to behave); `input` = the question.
+- `TypeVar T` = "you get back the type you passed in".
+- `temperature=0` = pick the most likely words → less randomness, **not** a guarantee of identical answers (another reason math never lives in the LLM).
+- Azure: `MODEL_*` hold **deployment names**. Switching provider = config change only (a test proves it).
+- Fakes **record** what would have been sent → prove the guard blocked a call **before** anything left (`client.requests == []`). Tests stay fast, free, offline.
+- `SimpleNamespace(...)` = quick object for fakes. `monkeypatch.setenv` = env var for one test only.
+
+### 🔴 Real example: a hallucination (keep this for interviews)
+One real call to `gpt-4o-mini` through the doorway, to check it works:
+- **Prompt:** "E007 wages rose from 28375 to 39725 and the register shows a bonus of 11350. Why did wages rise?"
+- **Answer:** `reason='Wages likely rose due to increased performance or productivity, leading to higher compensation and bonuses.'` `confident=True`
+- **Correct answer:** a one-time bonus of $11,350 (28,375 + 11,350 = 39,725; regular wages unchanged).
+
+**What went wrong:** the evidence was **in the prompt**, yet the model **invented** a cause ("increased performance or productivity") that appears nowhere in it, and said it was **confident**. This is a **hallucination**: fluent, plausible, made up.
+
+**Why it happens:** an LLM generates the most *likely-sounding* text, not the most *supported* text. "Performance → higher pay" is a common pattern in its training data, so it fills the gap with it. Nothing in the call forced it to stick to the evidence.
+
+**What we do about it (next steps):**
+1. A proper **prompt**: use only the evidence given; say "cannot determine" rather than guess.
+2. **Citations:** every claim must cite an evidence ID.
+3. **Citation validation:** reject any ID not in the evidence we sent.
+4. **Human approval** of every explanation; **evals** on the golden set (Phase 7).
+
+**Question: can the model's own `confident=True` be trusted?**
+- My answer: no, because it's evaluating itself.
+- Deeper: its "confidence" **isn't a measurement**. It's just more generated text, produced like any other word; it checked nothing.
+- Contrast with **our** extraction confidence (Phase 3): based on **checkable facts** (text layer vs scan, number cell vs typed text).
+- Rule: **never trust the model's word about itself; check its work from the outside** (citations, deterministic checks, humans, evals). Same idea as my Phase 0 point: an LLM judging its own work is too generous.
+
+### Step 3: Grounded explanations (`src/taxagent/agent/explain.py` + `prompts/explain_finding.v1.md`)
+**What:**
+- `gather_evidence(finding, current, previous)` → numbered facts **EV1, EV2…** from **our** extracted/computed values (each keeps its `SourceRef`s). Per kind: variance → the employee's regular/bonus/gross in both quarters; reconciliation → both totals + employee counts; missing/extra → the employee's lines. Plus the judge's own numbers (difference, percent).
+- `pattern_hints()`: the **code** proves patterns (difference ÷ 9 is whole → typical of swapped digits) and hands them over as evidence. **Code computes, LLM explains.**
+- Versioned prompt file: use only the evidence; cite IDs for every claim; never compute new numbers; `can_determine_cause=false` rather than guess.
+- LLM returns `Explanation(claims=[Claim(text, evidence_ids)], can_determine_cause)` via the doorway (`large` model), prompt masked first.
+- `validate()` checks from the **outside**: no claims; uncited claim; cites an ID we never gave; a **number not in the evidence**.
+- Result records `prompt_version` + `model` (reproducibility, Phase 7).
+- 8 tests with a `FakeLLM` → **127 passed**.
+
+**Real results with gpt-4o (after the improvements):**
+- **E007 variance:** "The increase in gross wages is due to a bonus of 11,350.00 in 2026Q2" [EV5, EV7]; regular wages unchanged [EV1, EV4]; `can_determine_cause=True`; **0 problems**. Compare with the earlier "increased performance" hallucination: evidence + prompt + checks fixed it.
+- **Q2 typo:** "The difference of 270.00 divided by 9 results in 30.00, suggesting a possible **transposition error**" [EV5, EV6]; 0 problems.
+- **Q1 missing employee:** cautious (`can_determine_cause=False`), but its evidence shows 19 vs 20 employees → points the analyst to the answer.
+
+**Learned:**
+- **Our validator had false alarms at first:** it flagged "Form **941** line **2**" as invented numbers (they're names). Checkers have **precision** too. Fix: numbers in evidence labels / the finding summary count as known.
+- Iterating: run on real data → read outputs → fix evidence/prompt/validator → rerun. Prompt engineering is **empirical**.
+- The prompt is a **file with a version**, so every explanation can say exactly which instructions produced it.
+- Honest limit: validation catches uncited claims, unknown IDs and invented numbers, but **not** a wrong *reason* that cites real evidence → that's why a **human approves** every explanation.
