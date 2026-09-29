@@ -954,3 +954,29 @@ One real call to `gpt-4o-mini` through the doorway, to check it works:
 - Iterating: run on real data → read outputs → fix evidence/prompt/validator → rerun. Prompt engineering is **empirical**.
 - The prompt is a **file with a version**, so every explanation can say exactly which instructions produced it.
 - Honest limit: validation catches uncited claims, unknown IDs and invented numbers, but **not** a wrong *reason* that cites real evidence → that's why a **human approves** every explanation.
+- **General lesson about our own checks** (I didn't know): **our checks can be wrong too**. A validator is a check → it has **recall** (catches real problems: invented numbers ✅) and **precision** (flags only real problems: "Form 941" ❌ false alarm).
+  - False alarms are dangerous: people learn to **ignore** the problems list (alert fatigue) → a real invented number goes unseen; and they look like the LLM's fault when our code was wrong.
+  - Caught by **running on real outputs and reading them**. The unit tests all passed; only real data showed the flaw.
+  - Fix: test checkers **in both directions** (catches bad answers **and** stays quiet on good ones); look at real outputs regularly; measure the checker's false-alarm rate in evals (Phase 7).
+  - **"Who checks the checker?"** Anything that judges (validator, threshold, LLM) needs its own tests for misses **and** false alarms.
+
+### Step 4: LangGraph workflow (`src/taxagent/agent/workflow.py` + `summary.py`)
+**Graph:** START → extract → **human_review ⏸** → compute → explain 🤖 → summarize 🤖 → **sign_off ⏸** → finalize → END (⏸ = pause for a person; 🤖 = LLM drafts, never decides).
+**Ideas:**
+- **State** = one dict passed through the graph; each node returns only what it changed, LangGraph merges it. Must be **JSON-friendly** so the checkpointer can save it.
+- **Nodes** = plain functions; **edges** = what runs next (explicit wiring = the diagram).
+- **`interrupt(request)`** pauses and saves everything; **`invoke(Command(resume=answer))`** continues, even after a restart. On resume, the paused node **re-runs from its start** and `interrupt()` returns the answer.
+- **`thread_id`** = the run's name in the checkpointer. Prototype proved: pause in process 1 → resume in a **fresh** process 2.
+- **Structural rules in code:** review complete only when every unreadable value has a valid amount (else ask again with reasons); every finding needs accept/reject; **maker-checker** (the corrector can't sign off); no path to `finalize` except through `sign_off`.
+- Nodes defined inside `build_workflow` = **closures** (they "see" the injected `llm`) → tests pass a fake.
+- `summary.py`: the summary cites **finding IDs** (F1, F2).
+
+### Code review of Step 4 (before committing) — all 4 points valid
+1. **Summary lacked checks the explanations had** (numbers, no-claims) → added, reusing `numbers_in`: any number not in the text the model was shown is flagged. Summaries are where numbers get rounded/restated.
+2. **Corrections recorded but never applied** ⚠️ `compute` re-read `values.jsonl`, so the reviewer's fixes never reached the math. No test caught it because no check reads W-2 fields → a **latent bug**: the audit trail would *say* "corrected by alice" while the math used the old value (the record lies).
+   - Fix: `review/corrections.py` → `apply_corrections()` used by **both** compute and explain. Corrected values keep their `SourceRef`, get confidence 1.0 and **`corrected_by`** (new schema field). A correction matching nothing **fails loudly**.
+   - Test uses a **spy** (a wrapper that records what `run_checks` receives). Verified the test **fails with the bug put back** and passes with the fix: a regression test is only useful if it fails on the bug.
+3. **`Decimal` accepts `NaN`, `Infinity`** (and `-500`) → `amount_problem()`: must be a number, finite, and ≥ 0.
+4. **Rejected runs are saved too** → correct **by design** (a rejection is a decision; auditors want it). The dashboard (Phase 6) shows only `approved`.
+- **153 passed.**
+- **Lesson:** review your own work like an auditor; "all tests pass" only means the tests you wrote pass. Pointing out gaps in your own system is a strong interview move.

@@ -38,3 +38,4 @@ class ExtractedValue(BaseModel):
     value: Decimal | None  # None = we couldn't read it (e.g. a scan)
     confidence: float = Field(ge=0, le=1)
     source: SourceRef
+    corrected_by: str | None = None  # set when a human typed in the value
