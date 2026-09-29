@@ -980,3 +980,8 @@ One real call to `gpt-4o-mini` through the doorway, to check it works:
 4. **Rejected runs are saved too** → correct **by design** (a rejection is a decision; auditors want it). The dashboard (Phase 6) shows only `approved`.
 - **153 passed.**
 - **Lesson:** review your own work like an auditor; "all tests pass" only means the tests you wrote pass. Pointing out gaps in your own system is a strong interview move.
+- I asked Claude to apply the review fixes directly to my pasted files; it compared my files with its tested versions first, changed only what the fixes needed, and ran the full suite in my project (153 passed). Then I read the diff before committing.
+- **Why enforce sign-off/maker-checker in code, not a procedure document?**
+  - My answer: code is the only way through; it can't be bypassed. A document is just an instruction, not an implementation.
+  - Plus: instructions get skipped under deadline pressure ("just this once"); code produces **evidence** automatically (who reviewed, who signed, what they decided) so auditors **verify** instead of trust; tests **prove** the control works.
+  - **Weak spot:** names are typed in, so anyone can type "bob". Maker-checker is only as strong as **identity** → production uses a real login (**Entra ID**) so "bob" is Bob. Rule in code + trusted identity = defence in depth.
