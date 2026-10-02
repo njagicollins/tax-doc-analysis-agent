@@ -1021,3 +1021,15 @@ One real call to `gpt-4o-mini` through the doorway, to check it works:
 - **Two people answering one run at once:** both see "waiting", both resume, **last save wins**: one review silently disappears, so the evidence no longer matches what happened. Can't really happen with one CLI user; can with a web UI. Fix: **lock** the run, or **optimistic locking** (before saving, check the run is still in the state you read; refuse if not). *Added to the Phase 6 plan.*
 - **`build_workflow(None, ...)`:** the hint says `llm: LLM`, we pass `None`. Safe because reading state never runs a step (and if one ever did, `None.parse` crashes loudly, not silently). A type-hint mismatch, not a bug.
 - Lesson: a limitation is fine if it's **known, written down, and scheduled** for when it becomes real. Fixing everything now = building for problems you don't have yet.
+
+- **Why run the LLM after human review, not before?**
+  - I wasn't sure, so I asked. The order is **facts (human confirms) → math (code) → words (LLM)**: the LLM explains findings, findings come from math, math comes from values, so the values must be final first.
+  1. **Before review some values are wrong or missing** (6 of E017's W-2 values were unreadable). LLM first = a fluent, confident explanation of a wrong result, which is worse than none because it looks trustworthy.
+  2. **It would have to run twice.** Corrections change the numbers → the first explanations are stale → double cost and two versions ("which one did bob see when he signed?").
+  3. **Anchoring:** the reviewer should type what the scan says, not be influenced by an AI story about the numbers.
+  - **Nuance:** review makes values *confirmed by a person*, not *correct*. In run 1 alice's typo (427.78) passed review and the LLM ran on it → that's why a different person signs off **after** the LLM.
+  - One sentence: the LLM runs last because it only **describes**; it should describe final numbers, not provisional ones.
+
+**✅ Phase 5 complete.**
+
+**Phase 5 in 60 seconds:** `uv run taxagent run --quarter 2026Q2` starts a LangGraph workflow: extract → human review ⏸ → compute → explain 🤖 → summarize 🤖 → sign-off ⏸ → finalize. Every step is saved in a SQLite checkpointer, so a run pauses for a person and resumes later, even in a new process (`status`, `resume`). The LLM only drafts: it never does the math and never decides. All calls go through one doorway that masks PII, blocks the call if any PII is left, routes the model from config and returns structured output. Every explanation and summary claim must cite its evidence, and any number that wasn't in the text the model was shown is flagged. Reviewer corrections are applied to the values before the math and keep their SourceRef plus who corrected them. Maker-checker is enforced in code: whoever corrected values can't sign off, and nothing reaches finalize without a sign-off. On a real gpt-4o run the checker rejected the first run over a typed-in typo (427.78 vs 427.76), and the second run was approved by a different person with 0 validation problems.
