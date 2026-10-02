@@ -10,6 +10,8 @@ from langgraph.types import Command
 from synthetic.__main__ import main as generate_everything
 from taxagent.agent import workflow as workflow_module
 from taxagent.agent.explain import Claim, Explanation
+from taxagent.agent.roster import load_roster
+from taxagent.agent.runner import resume_run, run_status, start_run
 from taxagent.agent.summary import Summary
 from taxagent.agent.workflow import build_workflow
 from taxagent.extraction.run import run_extraction
@@ -187,3 +189,40 @@ def test_review_rejects_values_that_are_not_real_amounts(world, bad):
 
     [problem] = pending(workflow)["problems"]
     assert problem.startswith("w2.box_1 (E017)")
+
+
+def fake_llm(roster):
+    return FakeLLM()
+
+
+def test_roster_comes_from_the_payroll_snapshot(world):
+    roster = load_roster("2026Q2")
+
+    assert len(roster) == 20
+    assert roster["E001"] == "Patrick Sanchez"
+
+
+def test_runner_start_status_and_resume(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    assert run["run_id"].startswith("2026Q2-")
+    assert run_status(run["run_id"])["pending"]["step"] == "review"
+
+    run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+    assert run["pending"]["step"] == "sign_off"
+
+    run = resume_run(run["run_id"], sign_off("bob"), make_llm=fake_llm)
+    assert (run["status"], run["pending"]) == ("approved", None)
+
+
+def test_a_finished_run_cannot_be_resumed(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+    resume_run(run["run_id"], sign_off("bob"), make_llm=fake_llm)
+
+    with pytest.raises(ValueError, match="not waiting"):
+        resume_run(run["run_id"], sign_off("bob"), make_llm=fake_llm)
+
+
+def test_unknown_runs_are_reported(world):
+    with pytest.raises(KeyError, match="no-such-run"):
+        run_status("no-such-run")

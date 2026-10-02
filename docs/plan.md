@@ -44,6 +44,8 @@ Build it end to end with a thin version of every layer first, then deepen. Phase
 - Exceptions: the AI explanation with citations, approve or reject
 - Dashboard: reconciliation status, variances, review progress
 - Sign-off with a simulated role switch that enforces maker-checker
+- Two people answering one run: lock the run, or refuse the save if its state changed since it was read (optimistic locking), so no review is silently lost
+- One checkpoint database connection for the app's lifetime, closed on shutdown (a long-running server would otherwise leak one per request)
 
 ## Phase 7: Audit + evals (1 day)
 - Run metadata: input hashes, prompt versions, model names, git commit

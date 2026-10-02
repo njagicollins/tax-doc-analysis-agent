@@ -985,3 +985,39 @@ One real call to `gpt-4o-mini` through the doorway, to check it works:
   - My answer: code is the only way through; it can't be bypassed. A document is just an instruction, not an implementation.
   - Plus: instructions get skipped under deadline pressure ("just this once"); code produces **evidence** automatically (who reviewed, who signed, what they decided) so auditors **verify** instead of trust; tests **prove** the control works.
   - **Weak spot:** names are typed in, so anyone can type "bob". Maker-checker is only as strong as **identity** → production uses a real login (**Entra ID**) so "bob" is Bob. Rule in code + trusted identity = defence in depth.
+
+### Step 5: Run it for real (`agent/roster.py`, `agent/runner.py`, CLI `run` / `status` / `resume`)
+**What:**
+- `load_roster(quarter)`: employee ID → name from the latest payroll snapshot in the **raw zone** (our own evidence), used only for masking.
+- `runner.py`: `start_run`, `run_status`, `resume_run`. Each run = a LangGraph thread (`2026Q2-<run id>`) in `data/runs/checkpoints.db`. Reading saved state never runs a step, so it needs no LLM.
+- CLI stays thin: `taxagent run --quarter`, `taxagent status --run`, `taxagent resume --run ID --answer file.json`. Answers are JSON files (the UI comes in Phase 6).
+- 4 new tests → **161 passed**.
+
+**Real end-to-end run (gpt-4o), played as two people:**
+1. `run` → extracted Q2 → **paused**: 6 E017 W-2 values need a human.
+2. **alice** typed the 6 values (read off the scan) → resumed → compute → explain → summary → **paused for sign-off**.
+3. **First run: bob rejected it.** alice had typed E017 box 6 as 427.78; the scan and payroll (213.88 + 213.88) say **427.76**. The run ended as `rejected` and was saved with bob's note. The checker caught the maker's typo: the control worked on a real mistake, not a staged one.
+4. A finished run can't be resumed, so I fixed the answer file and started a **second run**.
+5. **alice** tried to sign off → **blocked**: "maker-checker: alice corrected values in this run, so a different person must sign off".
+6. **bob** signed off → **approved**; result saved to `data/results/2026Q2/<run id>.json`. Both results are kept: the rejected one is evidence too.
+- Real summary, every claim cited, **0 problems**: "There is a discrepancy of 270.00 between the register gross wages and Form 941 line 2, possibly due to a transposition error (F1)." / "The gross wages for employee E007 increased by 40.00% due to a bonus of 11,350.00 in 2026Q2 (F2)." / "…requires a human decision to verify the potential transposition error (F1)."
+
+**Learned:**
+- Keep workflow logic in a module (`runner.py`), CLI only prints → thin shell again.
+- `MakeLLM` = a **factory** (a function that builds the LLM); tests pass `fake_llm` instead of the real one.
+- A finished run can't be resumed; an unknown run ID fails clearly.
+- Keep answer files under `data/` (git-ignored): they contain reviewer decisions and values.
+- **My pasting mistakes:** put the new `add_parser` blocks inside `run_compute_command` instead of the parser function (would crash `taxagent compute` with `NameError: commands`; tests missed it), forgot `import json`, and forgot the test imports (4 × `NameError`). Lesson: when pasting into an existing file, check *which function you're inside* — indentation decides; a `NameError` usually means a missing import.
+
+**Known limitation: the roster is incomplete (logged, not fixed):**
+- The roster comes from **one quarter's payroll database** only. So it misses: people who left since last quarter, and **ghost employees** (in the register, not in the database).
+- **Why it can't leak today:** names never go into prompts. Extraction saves `employee_id`, not names; finding summaries and evidence labels use IDs. The roster is the **second** safety net (the guard); the first is not sending names at all. And only `variance` uses last quarter, which needs the person in *both* quarters, so they're in the roster anyway.
+- A suggested fix, `{**load_roster(previous_quarter(q)), **load_roster(q)}`, would **crash** on the first quarter ever run (no previous snapshot) and still miss ghosts.
+- **Better fix, if names ever enter prompts:** build the roster from *every* source that has names (database + register), skipping quarters that don't exist.
+- Lesson: before fixing a "gap", check whether it can actually happen, and whether the fix covers the whole problem or just the case someone noticed.
+
+**More known limitations (logged, not fixed):**
+- **Connections never closed:** each `checkpointer()` opens a new SQLite connection. Fine for the CLI (the process exits, Windows closes the file). In a **long-running server** (Phase 6 UI) they'd pile up → open one at startup, close at shutdown. *Added to the Phase 6 plan.*
+- **Two people answering one run at once:** both see "waiting", both resume, **last save wins**: one review silently disappears, so the evidence no longer matches what happened. Can't really happen with one CLI user; can with a web UI. Fix: **lock** the run, or **optimistic locking** (before saving, check the run is still in the state you read; refuse if not). *Added to the Phase 6 plan.*
+- **`build_workflow(None, ...)`:** the hint says `llm: LLM`, we pass `None`. Safe because reading state never runs a step (and if one ever did, `None.parse` crashes loudly, not silently). A type-hint mismatch, not a bug.
+- Lesson: a limitation is fine if it's **known, written down, and scheduled** for when it becomes real. Fixing everything now = building for problems you don't have yet.

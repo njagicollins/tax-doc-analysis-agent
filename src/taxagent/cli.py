@@ -1,6 +1,7 @@
 """Command-line entry point, e.g. uv run taxagent ingest --quarter 2026Q2"""
 
 import argparse
+import json
 import os
 import re
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import httpx2
 from dotenv import load_dotenv
 
+from taxagent.agent.runner import resume_run, run_status, start_run
 from taxagent.compute.run import run_compute
 from taxagent.extraction.run import REVIEW_THRESHOLD, run_extraction
 from taxagent.ingestion.pipeline import ingest
@@ -70,6 +72,16 @@ def run_compute_command(quarter: str) -> None:
         print(f"  [{finding.kind}] {finding.summary}")
 
 
+def show_run(run: dict) -> None:
+    print(f"Run {run['run_id']}: {run['status']}")
+    if run["pending"] is None:
+        print("Not waiting for anyone.")
+        return
+    print("Waiting for a person. Request:")
+    print(json.dumps(run["pending"], indent=2))
+    print(f"Answer with: taxagent resume --run {run['run_id']} --answer answer.json")
+
+
 def main(argv: list[str] | None = None) -> None:
     load_dotenv()
 
@@ -90,6 +102,20 @@ def main(argv: list[str] | None = None) -> None:
     )
     compute_command.add_argument("--quarter", required=True, type=quarter_arg)
 
+    run_command = commands.add_parser(
+        "run", help="Start the full workflow; it pauses when a person is needed"
+    )
+    run_command.add_argument("--quarter", required=True, type=quarter_arg)
+
+    status_command = commands.add_parser(
+        "status", help="Show what a run is waiting for"
+    )
+    status_command.add_argument("--run", required=True)
+
+    resume_command = commands.add_parser("resume", help="Answer a paused run")
+    resume_command.add_argument("--run", required=True)
+    resume_command.add_argument("--answer", required=True, type=Path)
+
     args = parser.parse_args(argv)
     if args.command == "ingest":
         run_ingest(args.quarter)
@@ -97,3 +123,10 @@ def main(argv: list[str] | None = None) -> None:
         run_extract(args.quarter)
     elif args.command == "compute":
         run_compute_command(args.quarter)
+    elif args.command == "run":
+        show_run(start_run(args.quarter))
+    elif args.command == "status":
+        show_run(run_status(args.run))
+    elif args.command == "resume":
+        answer = json.loads(args.answer.read_text(encoding="utf-8"))
+        show_run(resume_run(args.run, answer))
