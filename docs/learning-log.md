@@ -857,3 +857,167 @@ SQLite DB  ───┘
 **✅ Phase 4 complete.**
 
 **Phase 4 in 60 seconds:** `uv run taxagent compute --quarter 2026Q2` is the judge. It runs pure, deterministic Python checks over the extracted values: reconciliations (register vs Form 941, register vs payroll database, employee lists including ghost employees) with a $1.00 tolerance, and quarter-over-quarter variance per employee with a 25% threshold. Every number is a traced amount that carries the SourceRefs of every value it was built from, unreadable values make the math refuse rather than guess, and edge cases (exactly $1.00, exactly 25%, division by zero, Q1 → previous year) are decided on purpose and locked in by tests. On real data it catches the typo ($270), the missing employee ($37,500, named E013) and the bonus (+40%). With the blurry scan caught in extraction, all four planted errors are found. No LLM touches the math.
+
+- **Slip again:** the "Mark Phase 4 complete" commit didn't include `ENGINEERING_GUIDE.md` (edit not saved) → fixed as the first commit on the Phase 5 branch. Turn on Auto Save.
+
+---
+
+## Phase 5: The LangGraph agent (where AI comes in)
+
+**What the LLM is for:** findings say **what** happened (`E007 +40%`), not **why**. An analyst would open the register, spot the $11,350 bonus line, and write the explanation. The LLM **drafts that explanation**, like a junior analyst. It may **not**: do the math (Phase 4 does), make the decision (a human does), or make claims without citing evidence (we check).
+
+**Workflow:** classify → extract → validate → compute → [PAUSE: human reviews low-confidence values] → explain findings (LLM) → draft summary (LLM) → [PAUSE: human sign-off] → finalize.
+
+| Idea | Meaning |
+|---|---|
+| **LangGraph** | workflows as a **graph** of steps (nodes) with state passed between them |
+| **Interrupt** | workflow **pauses** for a human (possibly days) |
+| **Checkpointer** | saves workflow state to disk (SQLite) → a paused run survives restarts |
+| **PII masking** | replace names/SSNs with placeholders **before** anything reaches the LLM |
+| **Citation validation** | every source the LLM cites must exist in the evidence we gave it |
+| **Versioned prompts** | prompts in files (`explain_finding.v1.md`) → each run records which prompt produced which text |
+
+**Q&A:**
+- **SQLite already built?** Yes and no: Phase 1's `payroll.db` is the **mock source**; the LangGraph **checkpointer** is a different SQLite file, not built yet.
+- **Could it be Redis?** Yes (LangGraph has a Redis checkpointer). SQLite = one file, nothing to run (local/single machine). Redis = separate server, faster, shared by many workers. Staying with SQLite.
+- **Why mask PII even with fake data and a reputable vendor?** My answer: it's PII, it can't reach the LLM. Why:
+  1. Once sent, it's out of our control (logs, backups, support tools, breaches).
+  2. Law/contracts: tax data is regulated; sending SSNs to a third party can be a reportable incident.
+  3. **Data minimisation:** the LLM doesn't need names to explain "E007 +40% due to a bonus".
+  4. Habit: mask **always**; the day someone forgets on real data, it leaks.
+
+### Step 1: PII masking (`src/taxagent/agent/pii.py`)
+**What:** `mask(text, roster)`: names → employee IDs (`Patrick Sanchez` → `E001`), SSNs → `[SSN]`. `assert_no_pii(text, roster)`: final guard, raises `PiiLeakError` if an SSN or known name remains. 10 tests (tricky roster: "Ann Lee" inside "Ann Lee-Smith", "Joann Leeds") → **111 passed**.
+**Learned:**
+- Masking is a safety net on **everything** leaving for the LLM (context text can contain PII even if findings don't).
+- **Pseudonymisation:** names → IDs, so the LLM can still say "E007" and humans can look it up. SSNs removed entirely (nothing needs them).
+- Regex `\b` = **word boundary** ("Ann Lee" must not match inside "Joann Leeds"). `re.escape()` makes symbols in names literal. `lambda` = tiny unnamed function (sort longest name first).
+- Error messages **never repeat the PII** (logs would leak it).
+- Honest limit: regex only catches **known** names + the SSN pattern → production adds **NER** / Azure AI Language PII detection.
+- Senior's slip: a Python edit script turned `\b` into an invisible backspace character; **ruff caught it** (another reason for a linter).
+- **Why both `mask()` and `assert_no_pii()`?** My answer: mask = first layer; the guard screams if mask misses PII. ✅ Wording: guard = **detection** that blocks (prevention + detection pair again).
+  - Why mask will miss someday: a bug in it; someone forgets to call it; text appended after masking; slightly different spelling.
+  - = **defence in depth**: independent layers so one failure isn't a breach. The guard only works if **every** LLM call passes through it → one doorway to the LLM (next step).
+
+### Step 2: One doorway to the LLM (`src/taxagent/agent/llm.py`)
+**What:** `LLM.parse(role, instructions, prompt, schema)` is the **only** way the project talks to a model. Every call: (1) passes the **PII guard**, (2) is routed by config (`small` → `MODEL_SMALL` = gpt-4o-mini, `large` → `MODEL_LARGE` = gpt-4o), (3) returns **structured output** (a validated Pydantic object). `llm_from_env()` picks OpenAI or Azure from `LLM_PROVIDER`. 8 tests with a `FakeClient` (no real calls) → **119 passed**. Added empty `AZURE_OPENAI_*` settings to `.env.example`.
+
+**Learned:**
+- **Choke point** = one controlled entry point → no caller can forget the PII guard.
+- **Structured output:** pass a Pydantic class; the model must reply with JSON that fits, validated on the way in → code reads `answer.reason`, never guesses from a paragraph.
+- `instructions` = system role (how to behave); `input` = the question.
+- `TypeVar T` = "you get back the type you passed in".
+- `temperature=0` = pick the most likely words → less randomness, **not** a guarantee of identical answers (another reason math never lives in the LLM).
+- Azure: `MODEL_*` hold **deployment names**. Switching provider = config change only (a test proves it).
+- Fakes **record** what would have been sent → prove the guard blocked a call **before** anything left (`client.requests == []`). Tests stay fast, free, offline.
+- `SimpleNamespace(...)` = quick object for fakes. `monkeypatch.setenv` = env var for one test only.
+
+### 🔴 Real example: a hallucination (keep this for interviews)
+One real call to `gpt-4o-mini` through the doorway, to check it works:
+- **Prompt:** "E007 wages rose from 28375 to 39725 and the register shows a bonus of 11350. Why did wages rise?"
+- **Answer:** `reason='Wages likely rose due to increased performance or productivity, leading to higher compensation and bonuses.'` `confident=True`
+- **Correct answer:** a one-time bonus of $11,350 (28,375 + 11,350 = 39,725; regular wages unchanged).
+
+**What went wrong:** the evidence was **in the prompt**, yet the model **invented** a cause ("increased performance or productivity") that appears nowhere in it, and said it was **confident**. This is a **hallucination**: fluent, plausible, made up.
+
+**Why it happens:** an LLM generates the most *likely-sounding* text, not the most *supported* text. "Performance → higher pay" is a common pattern in its training data, so it fills the gap with it. Nothing in the call forced it to stick to the evidence.
+
+**What we do about it (next steps):**
+1. A proper **prompt**: use only the evidence given; say "cannot determine" rather than guess.
+2. **Citations:** every claim must cite an evidence ID.
+3. **Citation validation:** reject any ID not in the evidence we sent.
+4. **Human approval** of every explanation; **evals** on the golden set (Phase 7).
+
+**Question: can the model's own `confident=True` be trusted?**
+- My answer: no, because it's evaluating itself.
+- Deeper: its "confidence" **isn't a measurement**. It's just more generated text, produced like any other word; it checked nothing.
+- Contrast with **our** extraction confidence (Phase 3): based on **checkable facts** (text layer vs scan, number cell vs typed text).
+- Rule: **never trust the model's word about itself; check its work from the outside** (citations, deterministic checks, humans, evals). Same idea as my Phase 0 point: an LLM judging its own work is too generous.
+
+### Step 3: Grounded explanations (`src/taxagent/agent/explain.py` + `prompts/explain_finding.v1.md`)
+**What:**
+- `gather_evidence(finding, current, previous)` → numbered facts **EV1, EV2…** from **our** extracted/computed values (each keeps its `SourceRef`s). Per kind: variance → the employee's regular/bonus/gross in both quarters; reconciliation → both totals + employee counts; missing/extra → the employee's lines. Plus the judge's own numbers (difference, percent).
+- `pattern_hints()`: the **code** proves patterns (difference ÷ 9 is whole → typical of swapped digits) and hands them over as evidence. **Code computes, LLM explains.**
+- Versioned prompt file: use only the evidence; cite IDs for every claim; never compute new numbers; `can_determine_cause=false` rather than guess.
+- LLM returns `Explanation(claims=[Claim(text, evidence_ids)], can_determine_cause)` via the doorway (`large` model), prompt masked first.
+- `validate()` checks from the **outside**: no claims; uncited claim; cites an ID we never gave; a **number not in the evidence**.
+- Result records `prompt_version` + `model` (reproducibility, Phase 7).
+- 8 tests with a `FakeLLM` → **127 passed**.
+
+**Real results with gpt-4o (after the improvements):**
+- **E007 variance:** "The increase in gross wages is due to a bonus of 11,350.00 in 2026Q2" [EV5, EV7]; regular wages unchanged [EV1, EV4]; `can_determine_cause=True`; **0 problems**. Compare with the earlier "increased performance" hallucination: evidence + prompt + checks fixed it.
+- **Q2 typo:** "The difference of 270.00 divided by 9 results in 30.00, suggesting a possible **transposition error**" [EV5, EV6]; 0 problems.
+- **Q1 missing employee:** cautious (`can_determine_cause=False`), but its evidence shows 19 vs 20 employees → points the analyst to the answer.
+
+**Learned:**
+- **Our validator had false alarms at first:** it flagged "Form **941** line **2**" as invented numbers (they're names). Checkers have **precision** too. Fix: numbers in evidence labels / the finding summary count as known.
+- Iterating: run on real data → read outputs → fix evidence/prompt/validator → rerun. Prompt engineering is **empirical**.
+- The prompt is a **file with a version**, so every explanation can say exactly which instructions produced it.
+- Honest limit: validation catches uncited claims, unknown IDs and invented numbers, but **not** a wrong *reason* that cites real evidence → that's why a **human approves** every explanation.
+- **General lesson about our own checks** (I didn't know): **our checks can be wrong too**. A validator is a check → it has **recall** (catches real problems: invented numbers ✅) and **precision** (flags only real problems: "Form 941" ❌ false alarm).
+  - False alarms are dangerous: people learn to **ignore** the problems list (alert fatigue) → a real invented number goes unseen; and they look like the LLM's fault when our code was wrong.
+  - Caught by **running on real outputs and reading them**. The unit tests all passed; only real data showed the flaw.
+  - Fix: test checkers **in both directions** (catches bad answers **and** stays quiet on good ones); look at real outputs regularly; measure the checker's false-alarm rate in evals (Phase 7).
+  - **"Who checks the checker?"** Anything that judges (validator, threshold, LLM) needs its own tests for misses **and** false alarms.
+
+### Step 4: LangGraph workflow (`src/taxagent/agent/workflow.py` + `summary.py`)
+**Graph:** START → extract → **human_review ⏸** → compute → explain 🤖 → summarize 🤖 → **sign_off ⏸** → finalize → END (⏸ = pause for a person; 🤖 = LLM drafts, never decides).
+**Ideas:**
+- **State** = one dict passed through the graph; each node returns only what it changed, LangGraph merges it. Must be **JSON-friendly** so the checkpointer can save it.
+- **Nodes** = plain functions; **edges** = what runs next (explicit wiring = the diagram).
+- **`interrupt(request)`** pauses and saves everything; **`invoke(Command(resume=answer))`** continues, even after a restart. On resume, the paused node **re-runs from its start** and `interrupt()` returns the answer.
+- **`thread_id`** = the run's name in the checkpointer. Prototype proved: pause in process 1 → resume in a **fresh** process 2.
+- **Structural rules in code:** review complete only when every unreadable value has a valid amount (else ask again with reasons); every finding needs accept/reject; **maker-checker** (the corrector can't sign off); no path to `finalize` except through `sign_off`.
+- Nodes defined inside `build_workflow` = **closures** (they "see" the injected `llm`) → tests pass a fake.
+- `summary.py`: the summary cites **finding IDs** (F1, F2).
+
+### Code review of Step 4 (before committing) — all 4 points valid
+1. **Summary lacked checks the explanations had** (numbers, no-claims) → added, reusing `numbers_in`: any number not in the text the model was shown is flagged. Summaries are where numbers get rounded/restated.
+2. **Corrections recorded but never applied** ⚠️ `compute` re-read `values.jsonl`, so the reviewer's fixes never reached the math. No test caught it because no check reads W-2 fields → a **latent bug**: the audit trail would *say* "corrected by alice" while the math used the old value (the record lies).
+   - Fix: `review/corrections.py` → `apply_corrections()` used by **both** compute and explain. Corrected values keep their `SourceRef`, get confidence 1.0 and **`corrected_by`** (new schema field). A correction matching nothing **fails loudly**.
+   - Test uses a **spy** (a wrapper that records what `run_checks` receives). Verified the test **fails with the bug put back** and passes with the fix: a regression test is only useful if it fails on the bug.
+3. **`Decimal` accepts `NaN`, `Infinity`** (and `-500`) → `amount_problem()`: must be a number, finite, and ≥ 0.
+4. **Rejected runs are saved too** → correct **by design** (a rejection is a decision; auditors want it). The dashboard (Phase 6) shows only `approved`.
+- **153 passed.**
+- **Lesson:** review your own work like an auditor; "all tests pass" only means the tests you wrote pass. Pointing out gaps in your own system is a strong interview move.
+- I asked Claude to apply the review fixes directly to my pasted files; it compared my files with its tested versions first, changed only what the fixes needed, and ran the full suite in my project (153 passed). Then I read the diff before committing.
+- **Why enforce sign-off/maker-checker in code, not a procedure document?**
+  - My answer: code is the only way through; it can't be bypassed. A document is just an instruction, not an implementation.
+  - Plus: instructions get skipped under deadline pressure ("just this once"); code produces **evidence** automatically (who reviewed, who signed, what they decided) so auditors **verify** instead of trust; tests **prove** the control works.
+  - **Weak spot:** names are typed in, so anyone can type "bob". Maker-checker is only as strong as **identity** → production uses a real login (**Entra ID**) so "bob" is Bob. Rule in code + trusted identity = defence in depth.
+
+### Step 5: Run it for real (`agent/roster.py`, `agent/runner.py`, CLI `run` / `status` / `resume`)
+**What:**
+- `load_roster(quarter)`: employee ID → name from the latest payroll snapshot in the **raw zone** (our own evidence), used only for masking.
+- `runner.py`: `start_run`, `run_status`, `resume_run`. Each run = a LangGraph thread (`2026Q2-<run id>`) in `data/runs/checkpoints.db`. Reading saved state never runs a step, so it needs no LLM.
+- CLI stays thin: `taxagent run --quarter`, `taxagent status --run`, `taxagent resume --run ID --answer file.json`. Answers are JSON files (the UI comes in Phase 6).
+- 4 new tests → **161 passed**.
+
+**Real end-to-end run (gpt-4o), played as two people:**
+1. `run` → extracted Q2 → **paused**: 6 E017 W-2 values need a human.
+2. **alice** typed the 6 values (read off the scan) → resumed → compute → explain → summary → **paused for sign-off**.
+3. **First run: bob rejected it.** alice had typed E017 box 6 as 427.78; the scan and payroll (213.88 + 213.88) say **427.76**. The run ended as `rejected` and was saved with bob's note. The checker caught the maker's typo: the control worked on a real mistake, not a staged one.
+4. A finished run can't be resumed, so I fixed the answer file and started a **second run**.
+5. **alice** tried to sign off → **blocked**: "maker-checker: alice corrected values in this run, so a different person must sign off".
+6. **bob** signed off → **approved**; result saved to `data/results/2026Q2/<run id>.json`. Both results are kept: the rejected one is evidence too.
+- Real summary, every claim cited, **0 problems**: "There is a discrepancy of 270.00 between the register gross wages and Form 941 line 2, possibly due to a transposition error (F1)." / "The gross wages for employee E007 increased by 40.00% due to a bonus of 11,350.00 in 2026Q2 (F2)." / "…requires a human decision to verify the potential transposition error (F1)."
+
+**Learned:**
+- Keep workflow logic in a module (`runner.py`), CLI only prints → thin shell again.
+- `MakeLLM` = a **factory** (a function that builds the LLM); tests pass `fake_llm` instead of the real one.
+- A finished run can't be resumed; an unknown run ID fails clearly.
+- Keep answer files under `data/` (git-ignored): they contain reviewer decisions and values.
+- **My pasting mistakes:** put the new `add_parser` blocks inside `run_compute_command` instead of the parser function (would crash `taxagent compute` with `NameError: commands`; tests missed it), forgot `import json`, and forgot the test imports (4 × `NameError`). Lesson: when pasting into an existing file, check *which function you're inside* — indentation decides; a `NameError` usually means a missing import.
+
+**Known limitation: the roster is incomplete (logged, not fixed):**
+- The roster comes from **one quarter's payroll database** only. So it misses: people who left since last quarter, and **ghost employees** (in the register, not in the database).
+- **Why it can't leak today:** names never go into prompts. Extraction saves `employee_id`, not names; finding summaries and evidence labels use IDs. The roster is the **second** safety net (the guard); the first is not sending names at all. And only `variance` uses last quarter, which needs the person in *both* quarters, so they're in the roster anyway.
+- A suggested fix, `{**load_roster(previous_quarter(q)), **load_roster(q)}`, would **crash** on the first quarter ever run (no previous snapshot) and still miss ghosts.
+- **Better fix, if names ever enter prompts:** build the roster from *every* source that has names (database + register), skipping quarters that don't exist.
+- Lesson: before fixing a "gap", check whether it can actually happen, and whether the fix covers the whole problem or just the case someone noticed.
+
+**More known limitations (logged, not fixed):**
+- **Connections never closed:** each `checkpointer()` opens a new SQLite connection. Fine for the CLI (the process exits, Windows closes the file). In a **long-running server** (Phase 6 UI) they'd pile up → open one at startup, close at shutdown. *Added to the Phase 6 plan.*
+- **Two people answering one run at once:** both see "waiting", both resume, **last save wins**: one review silently disappears, so the evidence no longer matches what happened. Can't really happen with one CLI user; can with a web UI. Fix: **lock** the run, or **optimistic locking** (before saving, check the run is still in the state you read; refuse if not). *Added to the Phase 6 plan.*
+- **`build_workflow(None, ...)`:** the hint says `llm: LLM`, we pass `None`. Safe because reading state never runs a step (and if one ever did, `None.parse` crashes loudly, not silently). A type-hint mismatch, not a bug.
+- Lesson: a limitation is fine if it's **known, written down, and scheduled** for when it becomes real. Fixing everything now = building for problems you don't have yet.
