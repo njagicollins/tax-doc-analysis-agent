@@ -93,9 +93,15 @@ def build_workflow(llm: LLM, checkpointer: Any):
     def extract(state: RunState) -> RunState:
         result = run_extraction(state["quarter"])
         items = [
-            {"field": v.field, "employee_id": v.employee_id, "confidence": v.confidence}
+            {
+                "field": v.field,
+                "employee_id": v.employee_id,
+                "confidence": v.confidence,
+                "source": v.source.model_dump(mode="json"),  # so a person can see it
+            }
             for v in result.needs_review
         ]
+
         return {"review_items": items, "status": "extracted"}
 
     def human_review(state: RunState) -> RunState:

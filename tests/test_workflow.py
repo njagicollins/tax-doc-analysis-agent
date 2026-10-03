@@ -11,12 +11,14 @@ from synthetic.__main__ import main as generate_everything
 from taxagent.agent import workflow as workflow_module
 from taxagent.agent.explain import Claim, Explanation
 from taxagent.agent.roster import load_roster
-from taxagent.agent.runner import resume_run, run_status, start_run
+from taxagent.agent.runner import list_runs, resume_run, run_status, start_run
 from taxagent.agent.summary import Summary
 from taxagent.agent.workflow import build_workflow
 from taxagent.extraction.run import run_extraction
 from taxagent.ingestion.pipeline import ingest
 from taxagent.ingestion.sources import SqlPayrollSource
+from taxagent.review.evidence import raw_file
+from taxagent.schema.models import SourceRef
 
 E017_BOXES = [f"w2.box_{n}" for n in range(1, 7)]
 
@@ -205,6 +207,7 @@ def test_roster_comes_from_the_payroll_snapshot(world):
 def test_runner_start_status_and_resume(world):
     run = start_run("2026Q2", make_llm=fake_llm)
     assert run["run_id"].startswith("2026Q2-")
+    assert run["quarter"] == "2026Q2"
     assert run_status(run["run_id"])["pending"]["step"] == "review"
 
     run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
@@ -226,3 +229,21 @@ def test_a_finished_run_cannot_be_resumed(world):
 def test_unknown_runs_are_reported(world):
     with pytest.raises(KeyError, match="no-such-run"):
         run_status("no-such-run")
+
+def test_list_runs_shows_every_saved_run(world):
+    assert list_runs() == []
+
+    first = start_run("2026Q2", make_llm=fake_llm)
+    second = start_run("2026Q2", make_llm=fake_llm)
+    resume_run(second["run_id"], full_review("alice"), make_llm=fake_llm)
+
+    runs = {run["run_id"]: run["pending"]["step"] for run in list_runs()}
+    assert runs == {first["run_id"]: "review", second["run_id"]: "sign_off"}
+
+def test_review_items_point_at_their_source_page(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+
+    for item in run["pending"]["items"]:
+        source = SourceRef(**item["source"])
+        assert raw_file(source, "2026Q2").name.endswith("_w2_2026_E017.pdf")
+        assert source.page == 1

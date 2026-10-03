@@ -37,9 +37,14 @@ def snapshot(workflow, run_id: str) -> dict:
     pending = next(
         (task.interrupts[0].value for task in state.tasks if task.interrupts), None
     )
-    return {"run_id": run_id, "status": state.values.get("status"), "pending": pending}
+    return {
+        "run_id": run_id,
+        "quarter": state.values.get("quarter"),
+        "status": state.values.get("status"),
+        "pending": pending,
+    }
 
-
+    
 def quarter_of(run_id: str, saver: SqliteSaver) -> str:
     # Reading saved state never runs a step, so no LLM is needed here
     values = build_workflow(None, saver).get_state(config(run_id)).values
@@ -69,3 +74,11 @@ def resume_run(run_id: str, answer: dict, make_llm: MakeLLM = llm_from_env) -> d
         raise ValueError(f"{run_id} is not waiting for anyone")
     workflow.invoke(Command(resume=answer), config(run_id))
     return snapshot(workflow, run_id)
+
+def list_runs() -> list[dict]:
+    """Every saved run with its status and what it waits for, newest first."""
+    saver = checkpointer()
+    run_ids = {c.config["configurable"]["thread_id"] for c in saver.list(None)}
+    workflow = build_workflow(None, saver)
+    return [snapshot(workflow, run_id) for run_id in sorted(run_ids, reverse=True)]
+
