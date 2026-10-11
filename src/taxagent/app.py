@@ -143,7 +143,6 @@ def sign_off_form(run: dict) -> None:
 
     show_corrections(request.get("corrections", []))
 
-
     st.markdown("**Summary** (drafted by AI, every sentence cites a finding)")
     for claim in request["summary"]["claims"]:
         st.markdown(f"- {claim['text']}")

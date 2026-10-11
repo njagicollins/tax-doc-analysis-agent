@@ -259,6 +259,7 @@ def test_the_signer_sees_each_explanation_and_its_evidence(world):
         assert finding["explanation"]["claims"][0]["evidence_ids"] == ["EV1"]
         assert finding["evidence"][0]["id"] == "EV1"
 
+
 def test_the_signer_sees_what_the_reviewer_typed_and_where_from(world):
     run = start_run("2026Q2", make_llm=fake_llm)
     run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
