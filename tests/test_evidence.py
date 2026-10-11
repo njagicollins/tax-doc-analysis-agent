@@ -2,7 +2,7 @@ import pymupdf
 import pytest
 
 from taxagent.ingestion.raw_store import TamperedFileError, store_raw
-from taxagent.review.evidence import location, page_image, raw_file
+from taxagent.review.evidence import DPI, location, page_image, raw_file
 from taxagent.schema.models import SourceRef
 
 PNG_START = b"\x89PNG"
@@ -67,3 +67,26 @@ def test_a_location_names_the_file_and_the_page_or_cell(tmp_path):
 
     assert location(in_pdf, tmp_path) == f"{pdf.path.name}, page 1"
     assert location(in_sheet, tmp_path) == f"{sheet.path.name}, Register!F10"
+
+
+def height_of(png: bytes) -> int:
+    return pymupdf.Pixmap(png).height
+
+
+def test_empty_paper_below_the_last_line_is_cut_off(tmp_path):
+    stored = store_raw(a_pdf(), "w2_E001.pdf", "2026Q2", raw_dir=tmp_path)
+    whole_page = pymupdf.open(stored.path)[0].get_pixmap(dpi=DPI).height
+
+    picture = page_image(stored.path, SourceRef(file_sha256=stored.sha256, page=1))
+
+    assert height_of(picture) < whole_page / 2  # the text is near the top
+
+
+def test_nothing_with_ink_on_it_is_cut_off(tmp_path):
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 700), "Total  63,250.00")  # near the bottom
+    stored = store_raw(doc.tobytes(), "w2_E002.pdf", "2026Q2", raw_dir=tmp_path)
+
+    picture = page_image(stored.path, SourceRef(file_sha256=stored.sha256, page=1))
+
+    assert height_of(picture) >= 700 * DPI / 72  # points -> pixels

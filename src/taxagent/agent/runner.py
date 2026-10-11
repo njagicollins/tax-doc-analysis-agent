@@ -13,7 +13,7 @@ from langgraph.types import Command
 
 from taxagent.agent.llm import LLM, llm_from_env
 from taxagent.agent.roster import load_roster
-from taxagent.agent.workflow import build_workflow
+from taxagent.agent.workflow import build_workflow, sign_off_request
 from taxagent.ingestion.manifest import new_run_id
 
 RUNS_DIR = Path("data/runs")
@@ -31,8 +31,19 @@ def config(run_id: str) -> dict:
     return {"configurable": {"thread_id": run_id}}
 
 
+def record_of(values: dict) -> dict | None:
+    """What the signer was shown and what they decided (None until a run is signed)."""
+    if "sign_off" not in values:
+        return None
+    return {
+        **sign_off_request(values),
+        "reviewer": values.get("reviewer"),
+        "sign_off": values["sign_off"],
+    }
+
+
 def snapshot(workflow, run_id: str) -> dict:
-    """The run's status, and what it is waiting for (None when nothing)."""
+    """The run's status, what it is waiting for (None when nothing), and its record."""
     state = workflow.get_state(config(run_id))
     pending = next(
         (task.interrupts[0].value for task in state.tasks if task.interrupts), None
@@ -42,6 +53,7 @@ def snapshot(workflow, run_id: str) -> dict:
         "quarter": state.values.get("quarter"),
         "status": state.values.get("status"),
         "pending": pending,
+        "record": record_of(state.values),
     }
 
 

@@ -270,3 +270,18 @@ def test_the_signer_sees_what_the_reviewer_typed_and_where_from(world):
         assert (correction["value"], correction["by"]) == ("1000.00", "alice")
         assert correction["machine_value"] is None  # the scan could not be read
         assert SourceRef(**correction["source"]).page == 1
+
+
+def test_a_signed_run_keeps_what_was_seen_and_decided(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+    assert run["record"] is None  # nobody has signed yet
+    seen = run["pending"]
+
+    resume_run(run["run_id"], sign_off("bob"), make_llm=fake_llm)
+
+    record = run_status(run["run_id"])["record"]
+    assert (record["reviewer"], record["sign_off"]["signer"]) == ("alice", "bob")
+    assert record["sign_off"]["decisions"] == {"F1": "accept", "F2": "accept"}
+    for part in ["summary", "corrections", "findings"]:
+        assert record[part] == seen[part]  # the record is what bob was shown

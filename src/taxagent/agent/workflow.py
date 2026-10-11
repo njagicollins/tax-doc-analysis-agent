@@ -79,6 +79,38 @@ def sign_off_problems(answer: dict, state: RunState) -> list[str]:
     return problems
 
 
+def sign_off_request(state: RunState) -> dict:
+    """Everything the signer must see. Built from saved state, so it can be rebuilt
+    later to show exactly what was signed."""
+    reviewed = {
+        (item["field"], item["employee_id"]): item for item in state["review_items"]
+    }
+    return {
+        "step": "sign_off",
+        "summary": state["summary"],
+        # The checker must see what the maker typed, next to its source
+        "corrections": [
+            {
+                **correction,
+                "machine_value": reviewed[key].get("machine_value"),
+                "source": reviewed[key].get("source"),
+            }
+            for correction in state.get("corrections", [])
+            for key in [(correction["field"], correction["employee_id"])]
+        ],
+        "findings": [
+            {
+                "id": item["finding_id"],
+                "summary": item["finding"]["summary"],
+                "explanation": item["explanation"],
+                "evidence": item["evidence"],
+                "problems": item["problems"],
+            }
+            for item in state["explained"]
+        ],
+    }
+
+
 def ask_until_valid(request: dict, check) -> dict:
     """Pause for a human; if the answer is incomplete, ask again with the reasons."""
     while True:
@@ -168,33 +200,7 @@ def build_workflow(llm: LLM, checkpointer: Any):
         }
 
     def sign_off(state: RunState) -> RunState:
-        reviewed = {
-            (item["field"], item["employee_id"]): item for item in state["review_items"]
-        }
-        request = {
-            "step": "sign_off",
-            "summary": state["summary"],
-            # The checker must see what the maker typed, next to its source
-            "corrections": [
-                {
-                    **correction,
-                    "machine_value": reviewed[key].get("machine_value"),
-                    "source": reviewed[key].get("source"),
-                }
-                for correction in state.get("corrections", [])
-                for key in [(correction["field"], correction["employee_id"])]
-            ],
-            "findings": [
-                {
-                    "id": item["finding_id"],
-                    "summary": item["finding"]["summary"],
-                    "explanation": item["explanation"],
-                    "evidence": item["evidence"],
-                    "problems": item["problems"],
-                }
-                for item in state["explained"]
-            ],
-        }
+        request = sign_off_request(state)
         answer = ask_until_valid(
             request, lambda answer: sign_off_problems(answer, state)
         )

@@ -1,0 +1,7 @@
+# How the app looks. Streamlit reads this file when it starts.
+[theme]
+base = "dark"                        # start from Streamlit's dark look, then adjust
+primaryColor = "#2DD4BF"             # bright teal: buttons, selected options, links
+backgroundColor = "#0F1B2A"          # the page: dark navy
+secondaryBackgroundColor = "#1B2A3C" # the sidebar, input boxes, table headers
+textColor = "#E8EEF4"                # near-white, easy to read on navy
