@@ -54,6 +54,7 @@ def snapshot(workflow, run_id: str) -> dict:
         "status": state.values.get("status"),
         "pending": pending,
         "record": record_of(state.values),
+        "trace": state.values.get("trace", []),
     }
 
 

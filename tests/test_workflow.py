@@ -285,3 +285,32 @@ def test_a_signed_run_keeps_what_was_seen_and_decided(world):
     assert record["sign_off"]["decisions"] == {"F1": "accept", "F2": "accept"}
     for part in ["summary", "corrections", "findings"]:
         assert record[part] == seen[part]  # the record is what bob was shown
+
+
+def test_a_run_leaves_a_trace_of_what_each_step_did_and_decided(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    [extract] = run["trace"]  # paused: only the first step has finished
+    assert extract["step"] == "extract"
+    assert "the run pauses for a person" in extract["notes"][0]
+
+    run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+    resume_run(run["run_id"], sign_off("alice"), make_llm=fake_llm)  # refused
+    run = resume_run(run["run_id"], sign_off("bob"), make_llm=fake_llm)
+
+    trace = {line["step"]: line for line in run["trace"]}
+    assert list(trace) == [
+        "extract",
+        "human_review",
+        "compute",
+        "explain",
+        "summarize",
+        "sign_off",
+        "finalize",
+    ]
+    assert trace["human_review"]["did"] == "alice typed 6 values from the source"
+    assert trace["compute"]["notes"][0].startswith("F1: Register gross wages")
+    assert trace["sign_off"]["did"] == "bob approved the run"
+    refused, *decisions = trace["sign_off"]["notes"]
+    assert refused.startswith("alice answered and was asked again: maker-checker")
+    assert decisions == ["F1: accept", "F2: accept"]
+    assert all(line["seconds"] >= 0 for line in run["trace"])

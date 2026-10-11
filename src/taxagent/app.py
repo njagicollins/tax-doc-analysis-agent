@@ -3,11 +3,16 @@
 Run it from the project root: uv run streamlit run src/taxagent/app.py
 """
 
+from html import escape
+from itertools import groupby
+
 import streamlit as st
 from dotenv import load_dotenv
 
-from taxagent.agent.diagram import pipeline_dot
+from taxagent.agent.diagram import HUMAN, describe, pipeline, workflow_order
 from taxagent.agent.runner import list_runs, resume_run, run_status, start_run
+from taxagent.agent.trace import duration, ingest_line, with_waits
+from taxagent.ingestion.manifest import read_rows
 from taxagent.ingestion.raw_store import TamperedFileError
 from taxagent.review.dashboard import (
     check_status,
@@ -306,6 +311,25 @@ def runs_page() -> None:
         st.json(run["pending"])
 
 
+def bars_html(counts: dict[str, int]) -> str:
+    """A bar per category, biggest first, with its full name and its number."""
+    longest = max(counts.values())
+    rows = sorted(counts.items(), key=lambda pair: -pair[1])
+    return "".join(
+        f"""
+<div style="display:grid;grid-template-columns:minmax(180px,38%) 1fr 36px;gap:12px;
+            align-items:center;margin:10px 0;color:#E8EEF4">
+  <div>{escape(name)}</div>
+  <div style="background:#1B2A3C;border-radius:4px">
+    <div style="width:{count / longest:.0%};height:18px;border-radius:4px;
+                background:{BAR}"></div>
+  </div>
+  <div style="text-align:right;font-weight:700">{count}</div>
+</div>"""
+        for name, count in rows
+    )
+
+
 def dashboard_page() -> None:
     results = load_results()
     quarters = official(results)
@@ -346,16 +370,7 @@ def dashboard_page() -> None:
     with right:
         st.subheader("What needed a person, by category")
         if counts:
-            st.bar_chart(
-                [{"category": name, "count": count} for name, count in counts.items()],
-                x="category",
-                y="count",
-                x_label="",
-                y_label="How many",
-                sort="-count",  # biggest first
-                horizontal=True,  # the category names are long
-                color=BAR,
-            )
+            st.html(bars_html(counts))
         else:
             st.success("Nothing needed a person this quarter.")
 
@@ -368,16 +383,156 @@ def dashboard_page() -> None:
             st.badge(decision, color=colour_of(decision))
 
 
+# The "How it works" tab. kind -> (colour, what it means)
+KIND = {
+    "human": ("#F59E0B", "waits for a person"),
+    "ai": ("#9085E9", "AI drafts text"),
+    "code": ("#5B7083", "code, no AI"),
+    "store": ("#2DD4BF", "stored data"),
+}
+MUTED = "#C5D0DB"
+ARROW = '<div style="text-align:center;color:#5B7083;font-size:20px;line-height:30px">↓</div>'
+CHIP = (
+    "border:1px solid #3A4C60;border-radius:999px;padding:1px 10px;"
+    f"font-size:13px;color:{MUTED}"
+)
+FOOT = "margin-top:10px;padding-top:8px;border-top:1px solid #2C3E50"
+WAITING_NOW = (
+    f'<div style="{FOOT};color:#F59E0B;font-weight:600">Waiting now for a person</div>'
+)
+NOT_REACHED = f'<div style="{FOOT};color:{MUTED}">Not reached yet</div>'
+NOT_TRACED = (
+    f'<div style="{FOOT};color:{MUTED}">Ran before tracing was added: no details</div>'
+)
+# What a paused run says it waits for -> the workflow step that asked
+ASKED_BY = {"review": "human_review", "sign_off": "sign_off"}
+
+
+def box_html(number: int, box: dict, foot: str = "", faded: bool = False) -> str:
+    """One step as a card: number and name, what it does, what it is built with.
+
+    `foot` is what happened at this step in one run; empty on the plain map.
+    """
+    colour, meaning = KIND[box["kind"]]
+    chips = "".join(
+        f'<span style="{CHIP}">{escape(tool)}</span>' for tool in box["tools"]
+    )
+    return f"""
+<div style="background:#1B2A3C;border:1px solid #2C3E50;border-left:6px solid {colour};
+            border-radius:10px;padding:12px 16px;color:#E8EEF4;
+            opacity:{0.5 if faded else 1}">
+  <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px">
+    <div style="flex:1;min-width:260px">
+      <div style="font-weight:700;font-size:17px">{number}. {escape(box["title"])}</div>
+      <div style="color:{MUTED}">{escape(box["what"])}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">{chips}</div>
+    </div>
+    <div style="font-size:13px;color:{MUTED};white-space:nowrap">
+      <span style="color:{colour}">●</span> {meaning}
+    </div>
+  </div>{foot}
+</div>"""
+
+
+def trace_html(line: dict) -> str:
+    """What one step did in this run: how long, what, and the decisions it made."""
+    if line["waited"] is None:
+        took = f"took {duration(line['seconds'])}"
+    else:
+        took = f"waited {duration(line['waited'])} for a person"
+    notes = "".join(f"<li>{escape(note)}</li>" for note in line.get("notes", []))
+    return f"""
+  <div style="{FOOT}">
+    <span style="{CHIP};color:#E8EEF4;border-color:#2DD4BF">{took}</span>
+    <span style="margin-left:8px">{escape(line["did"])}</span>
+    <ul style="margin:6px 0 0 0;padding-left:22px;color:{MUTED}">{notes}</ul>
+  </div>"""
+
+
+def show_cards(cards: list[str]) -> None:
+    st.html(f'<div style="max-width:820px">{ARROW.join(cards)}</div>')
+
+
+def show_map() -> None:
+    """Every step, before any run: what exists and what it is built with."""
+    st.caption(
+        "The workflow steps and their order are read from the code itself, "
+        "so this map is always current."
+    )
+    parts = []
+    numbered = enumerate(pipeline(), start=1)
+    for inside, group in groupby(numbered, key=lambda pair: pair[1]["in_workflow"]):
+        cards = ARROW.join(box_html(number, box) for number, box in group)
+        if inside:  # frame the steps LangGraph runs, and say what the frame means
+            cards = f"""
+<div style="border:1px dashed #5B7083;border-radius:14px;padding:14px">
+  <div style="font-size:13px;color:{MUTED};margin-bottom:10px">
+    <b style="color:#E8EEF4">THE WORKFLOW</b> · LangGraph saves the run to SQLite
+    after every step, so it can wait days for a person and survive a restart
+  </div>{cards}
+</div>"""
+        parts.append(cards)
+    show_cards(parts)
+
+
+def show_trace(run: dict) -> None:
+    """One run, step by step in the order things happened, then what is still to come."""
+    lines = run["trace"]
+    if not lines:
+        st.info(
+            "This run was saved before tracing was added. "
+            "Start a new run to see its trace."
+        )
+        return
+    done = with_waits(lines, HUMAN)  # waits are measured between this run's own steps
+    waiting = ASKED_BY.get(run["pending"]["step"]) if run["pending"] else None
+    # A run started before tracing existed has early steps with no line
+    order = workflow_order()
+    missing = [step for step in order if step not in done and step != waiting]
+    first_traced = order.index(lines[0]["step"])
+    untraced = [step for step in missing if order.index(step) < first_traced]
+    later = [step for step in missing if step not in untraced]
+    # Ingest is a separate command that ran earlier: shown first, never counted as a wait
+    ingest = ingest_line(run["quarter"], read_rows(), before=lines[0]["finished_at"])
+    timed = [*([{**ingest, "waited": None}] if ingest else []), *done.values()]
+
+    tiles = st.columns(3)
+    tiles[0].metric("Steps finished", len(timed) + len(untraced))
+    tiles[1].metric("Machine time", duration(sum(line["seconds"] for line in timed)))
+    tiles[2].metric(
+        "Waiting for people", duration(sum(line["waited"] or 0 for line in timed))
+    )
+
+    # (step, what to say under it, faded?) from first to last
+    rows = [
+        (line["step"], trace_html(line), False)
+        for line in timed[: len(timed) - len(done)]
+    ]
+    rows += [(step, NOT_TRACED, True) for step in untraced]
+    rows += [(step, trace_html(line), False) for step, line in done.items()]
+    if waiting:
+        rows.append((waiting, WAITING_NOW, False))
+    rows += [(step, NOT_REACHED, True) for step in later]
+    show_cards(
+        [
+            box_html(number, describe(step), foot, faded)
+            for number, (step, foot, faded) in enumerate(rows, start=1)
+        ]
+    )
+
+
 def how_it_works_page() -> None:
-    st.markdown(
-        "From the documents arriving to the saved result. The workflow steps and "
-        "arrows are read from the code itself, so this picture is always current."
+    runs = {run["run_id"]: run for run in list_runs()}
+    chosen = st.selectbox(
+        "Follow a run",
+        [None, *runs],
+        index=1 if runs else 0,  # the newest run, when there is one
+        format_func=lambda run_id: run_id or "No run: show the map of every step",
     )
-    st.markdown(
-        ":orange-badge[waits for a person] :violet-badge[AI drafts text] "
-        ":gray-badge[code, no AI]"
-    )
-    st.graphviz_chart(pipeline_dot())
+    if chosen is None:
+        show_map()
+    else:
+        show_trace(runs[chosen])
 
 
 runs_tab, dashboard_tab, how_tab = st.tabs(["Runs", "Dashboard", "How it works"])
