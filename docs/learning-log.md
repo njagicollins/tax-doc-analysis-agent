@@ -1083,7 +1083,7 @@ One real call to `gpt-4o-mini` through the doorway, to check it works:
 - alice reviewed; alice tried to sign off → **blocked** (maker-checker) ✅
 - bob left one finding undecided → **asked again** ✅
 - bob decided everything → run finished ✅
-- F2's Evidence table should name the 2026Q1 register file: **TODO confirm, I didn't note this one**
+- F2's Evidence table names the 2026Q1 register file ✅ (checked on run `2026Q2-20261011T164556Z-25c60351`: EV1 to EV3 point at `payroll_register_2026Q1.xlsx`, cells D10, E10, F10; EV4 to EV6 at `payroll_register_2026Q2.xlsx`). I didn't note this on the day; Claude confirmed it later from the saved run.
 
 **Two gaps I found while testing (both fixed before the commit):**
 1. **The signer couldn't see what the reviewer typed.** I typed 427.75 instead of 427.76 as alice and the run accepted it. I thought it was an edge case. It isn't: for an unreadable scan the system has **no trusted number** to compare against, so the human's value becomes the truth. A one-cent typo is too small to trip a reconciliation, so the only safety net is the second person, and bob's screen never showed alice's values.
@@ -1122,3 +1122,43 @@ I looked at the sign-off screen and asked for: no huge blank gap, a way to reope
 - **Why the chart must wait and change shape:** categories must come from **code** (reconciliation difference, variance, unreadable scan), not from the AI's guess ("possible transposition" is not a fact). One run has 2 findings, so percentages would say 50% / 50%: show **counts**, across many runs.
 - **My pasting slip, caught by ruff:** I added the new `request = sign_off_request(state)` lines but didn't delete the old block below them → `F821 Undefined name 'reviewed'`. With both blocks the run would have **paused for sign-off twice**. "Undefined name" after an edit usually means a missing import or leftover old code. I also had the error loop pasted twice in `sign_off_form`, so every error showed twice.
 - For the last fixes I asked Claude to apply the changes directly; they were tested in a scratch copy first, then I read the diff before committing.
+
+### Step 4: Dashboard and run trace (`review/dashboard.py`, `agent/trace.py`, `agent/diagram.py`, three tabs in `app.py`)
+**What:**
+- **Dashboard tab.** For a quarter: three headline numbers (checks passed, findings, values typed in by a person), every check with a pass/fail badge, a bar per category of what needed a person, and each finding with the signer's decision.
+- **How it works tab.** Pick a run and see its **trace**: each step in the order it happened, with the tools it is built with, how long it took, what it did, and the decisions it made. "No run" shows the plain map of every step.
+- `dashboard.py`: `official()` = the latest **approved** run per quarter; `check_status()`; `counts_by_category()`; `rejected_since()`. It reads `data/results`, not the checkpoint database.
+- `trace.py`: `traced()` wraps every workflow step. The step returns a `"did"` sentence and optional `"notes"`; the wrapper adds the time and saves one line in the run's state.
+- `ask_until_valid` now also returns the answers it refused, so they appear in the trace.
+- Accept/approve are shown green and reject red (`format_func`).
+- **201 passed.**
+
+**Learned (dashboard):**
+- **Numbers first, screen second.** The dashboard's figures were written and tested as plain functions before anything was drawn.
+- **One official result per quarter.** I had 7 finished runs for 2026Q2; counting all of them would count the same finding 7 times.
+- **Show passed checks too.** If only failures are listed, "not shown" could mean "passed" or "never ran".
+- **Categories come from code, not from the AI.** "Possible transposition" is a guess; "reconciliation" and "variance" are facts the code decided.
+- **Counts, not percentages**, when numbers are small: 2 findings as "50% / 50%" says nothing.
+- **`Counter`** = a dictionary that counts how often each item appears.
+- **`format_func`** changes what is shown, not what is stored: the saved answer is still plain `accept`.
+- **Bars in one colour.** Green and red already mean good and bad in this app; a red bar would look like a judgement when it is only a count.
+- **Check question I got wrong:** the latest run for a quarter is rejected and an older one was approved: what does the dashboard show? I answered about the workflow blocking. Right answer: it shows the older approved run, which is only half right, because a manager would assume all is fine. So the dashboard warns "a later run was rejected". **A dashboard must not hide bad news.**
+
+**Learned (trace):**
+- **I asked for a diagram; what I wanted was a trace.** The first version was a fixed list of steps. I said it should "follow the flow": what actually happened in a run, with time, tools and a summary per step. A **map** shows what exists; a **trace** shows what happened.
+- **Each step writes its own line while the run happens**, and the line is saved with the run. Reading a trace later never re-runs anything.
+- **A wrapper** (`traced`) adds timing to all 7 steps without repeating code in each one.
+- **`operator.add` on the state's `trace`** tells LangGraph to add each new line to the list instead of replacing it (a **reducer**).
+- **A person's step is measured by waiting time**, not work time: the gap since the previous step finished.
+- **Refused answers are evidence too.** The trace caught my own first review ("alice answered and was asked again: w2.box_1 is not a number…") and alice's blocked sign-off.
+- **The steps and their order are read from LangGraph** (`get_graph()`), and a test fails if a step is added without a description. A test keeps the picture honest, not a reminder.
+- **Real numbers from my run (gpt-4o):** Explain 3.9 s, Summarize 1.7 s, Compute 39 ms, the rest under 50 ms. The AI is almost all of the machine time (5.6 of 5.7 s). That is where cost and delay live, and one more reason the math is done by code.
+
+**Bugs found by looking at the real screen (not by tests):**
+1. **Diagram text misaligned.** Graphviz placed the text using one font and Streamlit drew it with another. Fix: draw the steps as HTML cards, so the browser both measures and draws. Only the drawing changed; the tested data underneath stayed.
+2. **"Waited 11 d 21 h".** The wait was measured from the last ingest, a separate command that ran days earlier. Fix: waits are measured only between a run's own steps.
+3. **Extract shown last as "Not reached yet".** The run had started before tracing existed, so Extract had no line. Fix: such steps are shown in place as "Ran before tracing was added".
+4. **Chart labels cut off.** Fix: bars drawn as rows with the full name and the number.
+- Lesson: adding a feature to a system with **old saved data** needs a plan for that data (old runs have no trace). And for anything visual, a passing test proves the numbers, not the look: someone has to look.
+- A module imported by `app.py` needs a Streamlit **restart**; a change in `app.py` itself only needs a refresh. I was shown the old diagram until I restarted.
+- Most of these changes were applied directly by Claude after testing in a scratch copy; I checked each on screen and sent screenshots, which is how bugs 1 to 4 were found.
