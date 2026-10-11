@@ -46,6 +46,21 @@ def official(results: list[dict]) -> dict[str, dict]:
     return latest
 
 
+def rejected_since(results: list[dict], chosen: dict) -> list[dict]:
+    """Rejected runs of the same quarter made after the official one.
+
+    Someone looked again and said no, so the official numbers may be out of date.
+    The dashboard must say so, not hide it.
+    """
+    return [
+        result
+        for result in results
+        if result["quarter"] == chosen["quarter"]
+        and result["status"] == "rejected"
+        and result["run_id"] > chosen["run_id"]
+    ]
+
+
 def check_status(result: dict) -> list[dict]:
     """Every check with pass or fail, so a clean check is shown, not just absent."""
     failed = Counter(item["finding"]["check"] for item in result["findings"])

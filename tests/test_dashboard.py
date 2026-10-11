@@ -7,6 +7,7 @@ from taxagent.review.dashboard import (
     counts_by_category,
     load_results,
     official,
+    rejected_since,
 )
 
 
@@ -97,3 +98,17 @@ def test_results_are_read_from_every_quarters_folder(tmp_path):
         (folder / f"{run_id}.json").write_text(json.dumps(a_result(run_id)))
 
     assert [r["run_id"] for r in load_results(tmp_path)] == ["2026Q1-a", "2026Q2-b"]
+
+
+def test_a_later_rejected_run_is_reported():
+    approved = a_result("2026Q2-20261011T100000Z-bbbb")
+    results = [
+        a_result("2026Q2-20261002T100000Z-aaaa", status="rejected"),  # earlier
+        approved,
+        a_result("2026Q2-20261012T100000Z-cccc", status="rejected"),  # later
+        a_result("2026Q3-20261013T100000Z-dddd", status="rejected"),  # other quarter
+    ]
+
+    [later] = rejected_since(results, approved)
+
+    assert later["run_id"].endswith("cccc")

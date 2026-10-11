@@ -1,4 +1,4 @@
-"""The reviewer's app: a thin shell over runner.py.
+"""The reviewer's app: a thin shell over runner.py and review/dashboard.py.
 
 Run it from the project root: uv run streamlit run src/taxagent/app.py
 """
@@ -6,8 +6,16 @@ Run it from the project root: uv run streamlit run src/taxagent/app.py
 import streamlit as st
 from dotenv import load_dotenv
 
+from taxagent.agent.diagram import pipeline_dot
 from taxagent.agent.runner import list_runs, resume_run, run_status, start_run
 from taxagent.ingestion.raw_store import TamperedFileError
+from taxagent.review.dashboard import (
+    check_status,
+    counts_by_category,
+    load_results,
+    official,
+    rejected_since,
+)
 from taxagent.review.evidence import location, page_image, raw_file
 from taxagent.schema.models import SourceRef
 
@@ -18,9 +26,12 @@ COLOUR = {
     "approved": "green",
     "approve": "green",
     "accept": "green",
+    "pass": "green",
     "rejected": "red",
     "reject": "red",
+    "fail": "red",
 }
+BAR = "#3987E5"  # one blue for every bar: red and green already mean bad and good
 DOT = {"green": "🟢", "red": "🔴", "orange": "🟠"}
 
 
@@ -265,32 +276,114 @@ def show_record(run: dict) -> None:
             show_finding(finding, fold_evidence=False)
 
 
-runs = {run["run_id"]: run for run in list_runs()}
-if not runs:
-    st.info("No runs yet. Start one from the sidebar.")
-    st.stop()
+def runs_page() -> None:
+    runs = {run["run_id"]: run for run in list_runs()}
+    if not runs:
+        st.info("No runs yet. Start one from the sidebar.")
+        return
+
+    def label(run_id: str) -> str:
+        run = runs[run_id]
+        waiting = run["pending"]["step"] if run["pending"] else "nobody"
+        dot = DOT[colour_of(run["status"])]
+        return f"{dot} {run_id}  ·  {run['status']}  ·  waiting for: {waiting}"
+
+    run_id = st.selectbox("Run", list(runs), format_func=label)
+    run = run_status(run_id)
+
+    st.badge(run["status"], color=colour_of(run["status"]))
+    if run["pending"] is None:
+        st.subheader("Record: what was signed, and the decisions")
+        show_record(run)
+    elif run["pending"]["step"] == "review":
+        st.subheader("Review: type each value as it appears on the source")
+        review_form(run)
+    elif run["pending"]["step"] == "sign_off":
+        st.subheader("Sign-off: decide on each finding, then on the run")
+        sign_off_form(run)
+    else:
+        st.subheader(f"Waiting for: {run['pending']['step']}")
+        st.json(run["pending"])
 
 
-def label(run_id: str) -> str:
-    run = runs[run_id]
-    waiting = run["pending"]["step"] if run["pending"] else "nobody"
-    dot = DOT[colour_of(run["status"])]
-    return f"{dot} {run_id}  ·  {run['status']}  ·  waiting for: {waiting}"
+def dashboard_page() -> None:
+    results = load_results()
+    quarters = official(results)
+    if not quarters:
+        st.info("Nothing to show yet: no run has been approved.")
+        return
+
+    quarter = st.selectbox("Quarter", sorted(quarters, reverse=True))
+    result = quarters[quarter]
+    signer = result["sign_off"]["signer"]
+    st.caption(
+        f"The latest approved run: {result['run_id']}, approved by {signer}. "
+        "Rejected and unfinished runs are not counted."
+    )
+    later = rejected_since(results, result)
+    if later:
+        st.warning(
+            f"{len(later)} later run(s) for {quarter} were rejected. "
+            "These numbers may be out of date: open the rejected run to see why."
+        )
+
+    checks = check_status(result)
+    counts = counts_by_category(result)
+    passed = sum(row["result"] == "pass" for row in checks)
+    tiles = st.columns(3)
+    tiles[0].metric("Checks passed", f"{passed} of {len(checks)}")
+    tiles[1].metric("Findings", len(result["findings"]))
+    tiles[2].metric("Values typed in by a person", len(result.get("corrections", [])))
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Checks")
+        for row in checks:
+            found = f" ({row['findings']} found)" if row["findings"] else ""
+            st.markdown(
+                f":{colour_of(row['result'])}-badge[{row['result']}] {row['check']}{found}"
+            )
+    with right:
+        st.subheader("What needed a person, by category")
+        if counts:
+            st.bar_chart(
+                [{"category": name, "count": count} for name, count in counts.items()],
+                x="category",
+                y="count",
+                x_label="",
+                y_label="How many",
+                sort="-count",  # biggest first
+                horizontal=True,  # the category names are long
+                color=BAR,
+            )
+        else:
+            st.success("Nothing needed a person this quarter.")
+
+    st.subheader("Findings and decisions")
+    decisions = result["sign_off"]["decisions"]
+    for item in result["findings"]:
+        decision = decisions[item["id"]]
+        with st.container(border=True):
+            st.markdown(f"**{item['id']}**: {item['finding']['summary']}")
+            st.badge(decision, color=colour_of(decision))
 
 
-run_id = st.selectbox("Run", list(runs), format_func=label)
-run = run_status(run_id)
+def how_it_works_page() -> None:
+    st.markdown(
+        "From the documents arriving to the saved result. The workflow steps and "
+        "arrows are read from the code itself, so this picture is always current."
+    )
+    st.markdown(
+        ":orange-badge[waits for a person] :violet-badge[AI drafts text] "
+        ":gray-badge[code, no AI]"
+    )
+    st.graphviz_chart(pipeline_dot())
 
-st.badge(run["status"], color=colour_of(run["status"]))
-if run["pending"] is None:
-    st.subheader("Record: what was signed, and the decisions")
-    show_record(run)
-elif run["pending"]["step"] == "review":
-    st.subheader("Review: type each value as it appears on the source")
-    review_form(run)
-elif run["pending"]["step"] == "sign_off":
-    st.subheader("Sign-off: decide on each finding, then on the run")
-    sign_off_form(run)
-else:
-    st.subheader(f"Waiting for: {run['pending']['step']}")
-    st.json(run["pending"])
+
+runs_tab, dashboard_tab, how_tab = st.tabs(["Runs", "Dashboard", "How it works"])
+with runs_tab:
+    runs_page()
+with dashboard_tab:
+    dashboard_page()
+with how_tab:
+    how_it_works_page()
