@@ -230,6 +230,7 @@ def test_unknown_runs_are_reported(world):
     with pytest.raises(KeyError, match="no-such-run"):
         run_status("no-such-run")
 
+
 def test_list_runs_shows_every_saved_run(world):
     assert list_runs() == []
 
@@ -240,10 +241,31 @@ def test_list_runs_shows_every_saved_run(world):
     runs = {run["run_id"]: run["pending"]["step"] for run in list_runs()}
     assert runs == {first["run_id"]: "review", second["run_id"]: "sign_off"}
 
+
 def test_review_items_point_at_their_source_page(world):
     run = start_run("2026Q2", make_llm=fake_llm)
 
     for item in run["pending"]["items"]:
         source = SourceRef(**item["source"])
-        assert raw_file(source, "2026Q2").name.endswith("_w2_2026_E017.pdf")
+        assert raw_file(source).name.endswith("_w2_2026_E017.pdf")
         assert source.page == 1
+
+
+def test_the_signer_sees_each_explanation_and_its_evidence(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+
+    for finding in run["pending"]["findings"]:
+        assert finding["explanation"]["claims"][0]["evidence_ids"] == ["EV1"]
+        assert finding["evidence"][0]["id"] == "EV1"
+
+def test_the_signer_sees_what_the_reviewer_typed_and_where_from(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+
+    corrections = run["pending"]["corrections"]
+    assert {c["field"] for c in corrections} == set(E017_BOXES)
+    for correction in corrections:
+        assert (correction["value"], correction["by"]) == ("1000.00", "alice")
+        assert correction["machine_value"] is None  # the scan could not be read
+        assert SourceRef(**correction["source"]).page == 1

@@ -44,7 +44,7 @@ def snapshot(workflow, run_id: str) -> dict:
         "pending": pending,
     }
 
-    
+
 def quarter_of(run_id: str, saver: SqliteSaver) -> str:
     # Reading saved state never runs a step, so no LLM is needed here
     values = build_workflow(None, saver).get_state(config(run_id)).values
@@ -75,10 +75,10 @@ def resume_run(run_id: str, answer: dict, make_llm: MakeLLM = llm_from_env) -> d
     workflow.invoke(Command(resume=answer), config(run_id))
     return snapshot(workflow, run_id)
 
+
 def list_runs() -> list[dict]:
     """Every saved run with its status and what it waits for, newest first."""
     saver = checkpointer()
     run_ids = {c.config["configurable"]["thread_id"] for c in saver.list(None)}
     workflow = build_workflow(None, saver)
     return [snapshot(workflow, run_id) for run_id in sorted(run_ids, reverse=True)]
-

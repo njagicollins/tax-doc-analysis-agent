@@ -97,6 +97,8 @@ def build_workflow(llm: LLM, checkpointer: Any):
                 "field": v.field,
                 "employee_id": v.employee_id,
                 "confidence": v.confidence,
+                # What the machine read, if anything: shown to the signer only
+                "machine_value": None if v.value is None else str(v.value),
                 "source": v.source.model_dump(mode="json"),  # so a person can see it
             }
             for v in result.needs_review
@@ -166,13 +168,28 @@ def build_workflow(llm: LLM, checkpointer: Any):
         }
 
     def sign_off(state: RunState) -> RunState:
+        reviewed = {
+            (item["field"], item["employee_id"]): item for item in state["review_items"]
+        }
         request = {
             "step": "sign_off",
             "summary": state["summary"],
+            # The checker must see what the maker typed, next to its source
+            "corrections": [
+                {
+                    **correction,
+                    "machine_value": reviewed[key].get("machine_value"),
+                    "source": reviewed[key].get("source"),
+                }
+                for correction in state.get("corrections", [])
+                for key in [(correction["field"], correction["employee_id"])]
+            ],
             "findings": [
                 {
                     "id": item["finding_id"],
                     "summary": item["finding"]["summary"],
+                    "explanation": item["explanation"],
+                    "evidence": item["evidence"],
                     "problems": item["problems"],
                 }
                 for item in state["explained"]
