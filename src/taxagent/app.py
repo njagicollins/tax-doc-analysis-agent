@@ -14,12 +14,23 @@ from taxagent.schema.models import SourceRef
 PEOPLE = ["alice", "bob", "carol"]  # stand-ins until there is a real login
 
 # One colour per meaning, used everywhere: green = good, red = bad, orange = waiting
-COLOUR = {"approved": "green", "accept": "green", "rejected": "red", "reject": "red"}
+COLOUR = {
+    "approved": "green",
+    "approve": "green",
+    "accept": "green",
+    "rejected": "red",
+    "reject": "red",
+}
 DOT = {"green": "🟢", "red": "🔴", "orange": "🟠"}
 
 
 def colour_of(word: str) -> str:
     return COLOUR.get(word, "orange")
+
+
+def coloured(word: str) -> str:
+    """The word in its colour, in the markdown Streamlit understands."""
+    return f":{colour_of(word)}[**{word}**]"
 
 
 load_dotenv()
@@ -189,6 +200,7 @@ def sign_off_form(run: dict) -> None:
             decisions[finding["id"]] = st.radio(
                 f"Your decision on {finding['id']}",
                 ["accept", "reject"],
+                format_func=coloured,  # what is shown; the saved answer stays plain
                 captions=[
                     "It is real and the evidence supports the explanation",
                     "The finding or its explanation is wrong",
@@ -202,6 +214,7 @@ def sign_off_form(run: dict) -> None:
         verdict = st.radio(
             "The run as a whole",
             ["approve", "reject"],
+            format_func=coloured,
             captions=[
                 "The numbers can be used as they stand",
                 "Something must be fixed first",
