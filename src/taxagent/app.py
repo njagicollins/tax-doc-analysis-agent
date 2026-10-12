@@ -621,5 +621,11 @@ def audit_page() -> None:
 runs_tab, dashboard_tab, how_tab, audit_tab = st.tabs(
     ["Runs", "Dashboard", "How it works", "Audit"]
 )
+with runs_tab:
+    runs_page()
+with dashboard_tab:
+    dashboard_page()
+with how_tab:
+    how_it_works_page()
 with audit_tab:
     audit_page()
