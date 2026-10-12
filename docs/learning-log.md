@@ -1162,3 +1162,22 @@ I looked at the sign-off screen and asked for: no huge blank gap, a way to reope
 - Lesson: adding a feature to a system with **old saved data** needs a plan for that data (old runs have no trace). And for anything visual, a passing test proves the numbers, not the look: someone has to look.
 - A module imported by `app.py` needs a Streamlit **restart**; a change in `app.py` itself only needs a refresh. I was shown the old diagram until I restarted.
 - Most of these changes were applied directly by Claude after testing in a scratch copy; I checked each on screen and sent screenshots, which is how bugs 1 to 4 were found.
+
+### Step 5: One database connection, and two people answering the same run (`agent/runner.py`, `app.py`)
+**What:**
+- `start_run`, `run_status`, `resume_run`, `list_runs` take an optional `saver` (the database connection). The app opens **one** with `@st.cache_resource` and passes it in every time; the CLI passes nothing and gets a new one, as before.
+- Every snapshot of a run has a **`version`**: a fingerprint of where the run stands and what it is asking.
+- `resume_run(..., expected=version)` refuses an answer written for an older version with `StaleAnswerError`. A lock (`ANSWERING`) makes "check the version, then continue the run" one unit.
+- The app remembers which version each person was last shown (`st.session_state["seen"]`), sends it with their answer, and tells them when the run changed under them.
+- 4 new tests → **205 passed.**
+
+**Learned:**
+- **Streamlit reruns the whole script on every click**, so anything created in the script is created again each time. `st.cache_resource` = "make this once, hand back the same object on every rerun". Right for connections; in a CLI the process ends, so the problem never showed.
+- **Optimistic locking:** don't lock the run while someone looks at it; let everyone work, and check at the moment of saving whether the run is still as they saw it. "Optimistic" = we assume clashes are rare.
+- **Lost update** = the bug it prevents: two people read the same state, both answer, and one answer silently wins or is misread. Before this step bob's late answer vanished with no message.
+- **The version had to include the request, not only the checkpoint id.** Claude's first version used LangGraph's checkpoint id. Replaying two people in a test showed a gap: a **refused** answer (alice blocked by maker-checker) changes the request but not the checkpoint id. Lesson: test the scenario, not just the function.
+- **Honest limit:** the lock works inside one running copy of the app. Several copies on several servers would need the check inside the database.
+- **`ImportError: cannot import name 'StaleAnswerError'`** after the change: Streamlit had reloaded the new `app.py` but still held the old `runner.py`. Fix: stop and restart. Rule: only `app.py` changed → refresh; any other file → restart.
+- **Tested by hand with two browser windows** (alice and bob on the same run): the second person got "This run changed since you last looked: someone else answered it." ✅
+
+**Phase 6 in 60 seconds:** `uv run streamlit run src/taxagent/app.py` opens a three-tab app that is a thin shell over the same functions the CLI uses, so no rule lives in the screen. **Runs:** a reviewer types the values the machine could not read, beside the cropped source page, with the file's hash checked before it is shown; a second person signs off, seeing the reviewer's typed values, the AI's cited explanations and the evidence, with no default choice; a finished run opens read-only, rebuilt from saved state to show exactly what was signed. **Dashboard:** one official result per quarter (the latest approved run), every check as pass or fail, counts by category decided by code, and a warning if a later run was rejected. **How it works:** a trace of any run, step by step in the order it happened, with tools, time, what each step did and decided, including answers that were refused. One database connection serves the whole app, and an answer written for a state that has since changed is refused, so two people can't silently overwrite each other. On a real gpt-4o run the AI steps took 5.6 of 5.7 seconds of machine time.
