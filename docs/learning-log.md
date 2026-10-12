@@ -1033,3 +1033,151 @@ One real call to `gpt-4o-mini` through the doorway, to check it works:
 **✅ Phase 5 complete.**
 
 **Phase 5 in 60 seconds:** `uv run taxagent run --quarter 2026Q2` starts a LangGraph workflow: extract → human review ⏸ → compute → explain 🤖 → summarize 🤖 → sign-off ⏸ → finalize. Every step is saved in a SQLite checkpointer, so a run pauses for a person and resumes later, even in a new process (`status`, `resume`). The LLM only drafts: it never does the math and never decides. All calls go through one doorway that masks PII, blocks the call if any PII is left, routes the model from config and returns structured output. Every explanation and summary claim must cite its evidence, and any number that wasn't in the text the model was shown is flagged. Reviewer corrections are applied to the values before the math and keep their SourceRef plus who corrected them. Maker-checker is enforced in code: whoever corrected values can't sign off, and nothing reaches finalize without a sign-off. On a real gpt-4o run the checker rejected the first run over a typed-in typo (427.78 vs 427.76), and the second run was approved by a different person with 0 validation problems.
+
+---
+
+## Phase 6: The Streamlit app (a screen for the humans)
+
+**What the app is for:** in Phase 5 the reviewer answered by writing a JSON file. Nobody in a tax team will do that. The app gives the two humans in the workflow a screen: the **reviewer** types the values the machine couldn't read, the **signer** decides on each finding and on the run. The app adds **no new rules**: every rule still lives in the workflow.
+
+| Idea | Meaning |
+|---|---|
+| **Streamlit** | a Python library that turns a script into a web page; no HTML or JavaScript |
+| **Rerun model** | every click reruns the **whole script** from the top; the page is redrawn from saved state |
+| **Thin shell** | the app only draws and collects answers; logic stays in `runner.py` / `workflow.py` |
+| **Evidence view** | the reviewer sees the **source page** next to the box they type in |
+| **Least privilege** | each actor sees only what its job needs |
+
+### Steps 1-2: Review queue with the source page (`app.py`, `review/evidence.py`, `runner.list_runs`)
+**What:**
+- `list_runs()`: every saved run with its status and what it waits for, newest first. The snapshot now includes the **quarter**.
+- Review items carry their **`SourceRef`** (file hash, page, box), so the app can show where each value came from.
+- `review/evidence.py`: `raw_file(source)` finds the stored file by its hash and **verifies the hash** before showing it; `page_image()` draws the PDF page as a picture, with a red outline around the value when its position is known.
+- `app.py`: pick who you are (alice / bob / carol, a **simulated login**), start a run, pick a run, type each value beside its page. Values from the same page share one picture (E017's six boxes: one scan).
+- **167 passed.**
+
+**Learned:**
+- **Rerun model:** Streamlit reruns the whole script on every interaction. So the script must rebuild the page from what is saved (the checkpointer), not from variables in memory. `st.form` collects many inputs and sends them **together** on one button press; without it, every keystroke would rerun the page. `st.rerun()` redraws after an answer is saved.
+- **Thin-shell payoff:** the app calls the same `start_run` / `resume_run` / `run_status` the CLI does. No rule was copied into the app, so the CLI and the app can't disagree, and the rules are tested without a browser.
+- **A changed module needs a restart.** Streamlit reloads the page script (`app.py`) by itself, but not always the modules it imports (`workflow.py`, `evidence.py`). After changing those: stop and start Streamlit.
+- **PII on screen vs PII to the LLM (least privilege):** the reviewer sees the real W-2 page, name and SSN included, because the job is to read that page. The LLM gets masked text because its job (explain a variance) doesn't need names. Same data, different rule, because the **need** is different. Production: only assigned reviewers may open a page (roles from **Entra ID**), and every view is logged.
+- **Pseudonymisation again:** prompts and finding summaries say `E007`, not the name. A person with access to the roster can look the name up; the LLM can't.
+- **Evidence is verified before it is shown:** if the stored file no longer matches its hash, the app refuses (`TamperedFileError`) instead of showing a changed document as if it were the original.
+
+### Step 3: Sign-off form (`app.py` `sign_off_form`, `workflow.sign_off`, `evidence.location`)
+**What:**
+- The sign-off **request** now carries each finding's **explanation** and **evidence**, not just its summary.
+- The form shows: the AI summary, then per finding the AI explanation (labelled "a draft, not a decision") with the evidence IDs each sentence cites, an **Evidence** table (id, what, value, where), and an accept / reject choice. Then approve / reject for the whole run and a note.
+- `raw_file(source)` no longer takes a quarter: it searches **every quarter's folder** by hash. `location(source)` says where a value is in words: file name, then page or cell.
+- Maker-checker and missing decisions are **not** checked in the app. The app sends the answer; the workflow replies with `problems`; the app shows them in red.
+- 3 new tests → **170 passed.**
+
+**Learned:**
+- **Hash lookup across quarters:** F2 compares Q2 with Q1, so its evidence includes **last quarter's** register. Looking only in the current quarter's folder would fail. Files are named by their hash, so the quarter isn't needed to find one.
+- **No default decision (`index=None`):** if "accept" were pre-selected, a signer could press the button without reading: **rubber-stamping**. With nothing selected, every finding needs a conscious click, and the workflow refuses an answer with a decision missing.
+- **The request is the record of what the signer saw.** `interrupt(request)` saves the request in the checkpointer. So an auditor can later see exactly what was put in front of bob when he approved. If the app fetched extra data itself at draw time, nothing would prove he was shown it. A signature only means something if you can prove **what** was signed.
+  - I didn't know this one and asked. Second reason: the workflow decides **what** a signer must see, the app only decides **how it looks**, so any front end gets the same packet and it can be tested without a screen.
+- **Radio buttons can't be un-selected.** I noticed that after clicking accept or reject I couldn't get back to "nothing selected" without refreshing. That's how radio buttons work everywhere, not a bug: the empty state only exists before the first click, which is all `index=None` is for.
+
+**Manual test (2026-10-11), as alice then bob:**
+- alice reviewed; alice tried to sign off → **blocked** (maker-checker) ✅
+- bob left one finding undecided → **asked again** ✅
+- bob decided everything → run finished ✅
+- F2's Evidence table names the 2026Q1 register file ✅ (checked on run `2026Q2-20261011T164556Z-25c60351`: EV1 to EV3 point at `payroll_register_2026Q1.xlsx`, cells D10, E10, F10; EV4 to EV6 at `payroll_register_2026Q2.xlsx`). I didn't note this on the day; Claude confirmed it later from the saved run.
+
+**Two gaps I found while testing (both fixed before the commit):**
+1. **The signer couldn't see what the reviewer typed.** I typed 427.75 instead of 427.76 as alice and the run accepted it. I thought it was an edge case. It isn't: for an unreadable scan the system has **no trusted number** to compare against, so the human's value becomes the truth. A one-cent typo is too small to trip a reconciliation, so the only safety net is the second person, and bob's screen never showed alice's values.
+   - Fix: review items carry `machine_value` (what the machine read, or nothing); the sign-off request carries `corrections` with that value and the `SourceRef`; the app shows a table (field, typed, machine read, typed by) **beside the source page**. `by_page()` was pulled out of `review_form` because both screens now group values by page.
+   - Honest limit: this **shows** a typo, it doesn't **block** one. Bob can still not look. Stricter version: a tick per corrected value.
+   - Phase 5 caught a typo like this (427.78) only because bob happened to check the scan himself. Now the screen puts it in front of him.
+2. **"accept / reject" didn't say what it meant.** The AI said "possible transposition" and I agreed, so was that accept or reject? The code only stores the word.
+   - Fix: captions. accept = "It is real and the evidence supports the explanation"; reject = "The finding or its explanation is wrong". approve = "The numbers can be used as they stand"; reject = "Something must be fixed first". Plus one line: accepting a finding does **not** approve the run.
+   - The AI had **not** concluded: "possible transposition" and "could not tell the cause". The decision was mine. How to check it: 519,**47**5 vs 519,**74**5 has two digits swapped, and a swap always gives a difference divisible by 9 (270 = 9 × 30).
+- 1 new test → **171 passed.**
+
+**Learned from the gaps:**
+- **A control is only as good as what the checker can see.** Maker-checker in code stops alice signing her own work, but it doesn't make bob's check meaningful unless her work is on his screen.
+- **The machine saying "I can't read this" is a feature.** A missing value with low confidence sends the run to a human. A confident guess would have gone straight into the math.
+- **A label is part of the control.** If two signers read "accept" differently, the recorded decisions can't be compared.
+- **Clicking through the real app found what 170 passing tests didn't.** Tests check the rules I thought of; using it as alice and bob showed what was missing.
+- **My pasting slips:** added a second `import` line instead of adding the name to the existing one (again); one blank line too many in `app.py` and one too few before the new test. `ruff check` finds mistakes, `ruff format` fixes layout: run both before committing.
+
+### Step 3b: Four improvements I asked for after using the app (2026-10-11)
+I looked at the sign-off screen and asked for: no huge blank gap, a way to reopen a finished run, more colour, and a bar chart of errors per category. The first three are done; the chart is planned for the dashboard.
+
+**What:**
+- **Cropped evidence pictures** (`evidence.py`: `last_ink`, `page_image`). The "blank gap" was not empty screen: the picture was the whole W-2 page, and the W-2 only fills the top third. Now the empty paper below the last line is cut off (E017: 1210 → 520 pixels tall).
+- **Finished runs can be opened, read-only** (`workflow.sign_off_request`, `runner.record_of`, `app.show_record`). After I approved a run as bob, the app only said "Finished", so I couldn't check what F2 was about. Now a finished run shows the verdict, the note and a decision badge per finding; everything the signer saw is under one drop-down.
+- **Colour with meaning** (`COLOUR`, `DOT`, `colour_of` in `app.py`; `.streamlit/config.toml`). Green = good (approved, accept), red = bad (rejected, reject), orange = waiting. Coloured dots in the run list, coloured badges for status and decisions. I chose a dark navy theme.
+- 3 new tests → **174 passed.**
+
+**Learned:**
+- **A scan has no text layer**, so we can't ask the PDF where the text ends. We look at the **pixels**: go up from the bottom row by row and stop at the first row with ink. Only the bottom is cut, never the sides or top, so the red outline around a value stays in the right place. One test checks that paper is cut, another that **nothing with ink is cut**.
+- **The record is rebuilt, not stored twice.** The sign-off request is made only from saved state, so the same function (`sign_off_request`) can build it again after the run is finished. The test asserts the rebuilt record **equals** what bob was shown. It also works for old runs.
+- **Opening a finished run is an audit need, not a nice-to-have:** someone must be able to see later who reviewed, who signed, each decision and the evidence.
+- **One colour, one meaning.** `colour_of` is the only place that decides a colour, so "green means good" can't differ between screens. Colour for decoration distracts; colour that carries status helps scanning.
+- **A dark theme needs more than a background:** `base = "dark"`, light text, a slightly lighter sidebar, and a brighter button colour. The theme file is read only when Streamlit **starts**.
+- **Streamlit can't put a drop-down inside a drop-down**, so inside "What the signer saw" the evidence table is shown directly (`fold_evidence=False`).
+- **No new tests for colours and layout:** nothing there changes a rule or a number. Thin shell again: the look can change without touching tested logic.
+- **Why the chart must wait and change shape:** categories must come from **code** (reconciliation difference, variance, unreadable scan), not from the AI's guess ("possible transposition" is not a fact). One run has 2 findings, so percentages would say 50% / 50%: show **counts**, across many runs.
+- **My pasting slip, caught by ruff:** I added the new `request = sign_off_request(state)` lines but didn't delete the old block below them → `F821 Undefined name 'reviewed'`. With both blocks the run would have **paused for sign-off twice**. "Undefined name" after an edit usually means a missing import or leftover old code. I also had the error loop pasted twice in `sign_off_form`, so every error showed twice.
+- For the last fixes I asked Claude to apply the changes directly; they were tested in a scratch copy first, then I read the diff before committing.
+
+### Step 4: Dashboard and run trace (`review/dashboard.py`, `agent/trace.py`, `agent/diagram.py`, three tabs in `app.py`)
+**What:**
+- **Dashboard tab.** For a quarter: three headline numbers (checks passed, findings, values typed in by a person), every check with a pass/fail badge, a bar per category of what needed a person, and each finding with the signer's decision.
+- **How it works tab.** Pick a run and see its **trace**: each step in the order it happened, with the tools it is built with, how long it took, what it did, and the decisions it made. "No run" shows the plain map of every step.
+- `dashboard.py`: `official()` = the latest **approved** run per quarter; `check_status()`; `counts_by_category()`; `rejected_since()`. It reads `data/results`, not the checkpoint database.
+- `trace.py`: `traced()` wraps every workflow step. The step returns a `"did"` sentence and optional `"notes"`; the wrapper adds the time and saves one line in the run's state.
+- `ask_until_valid` now also returns the answers it refused, so they appear in the trace.
+- Accept/approve are shown green and reject red (`format_func`).
+- **201 passed.**
+
+**Learned (dashboard):**
+- **Numbers first, screen second.** The dashboard's figures were written and tested as plain functions before anything was drawn.
+- **One official result per quarter.** I had 7 finished runs for 2026Q2; counting all of them would count the same finding 7 times.
+- **Show passed checks too.** If only failures are listed, "not shown" could mean "passed" or "never ran".
+- **Categories come from code, not from the AI.** "Possible transposition" is a guess; "reconciliation" and "variance" are facts the code decided.
+- **Counts, not percentages**, when numbers are small: 2 findings as "50% / 50%" says nothing.
+- **`Counter`** = a dictionary that counts how often each item appears.
+- **`format_func`** changes what is shown, not what is stored: the saved answer is still plain `accept`.
+- **Bars in one colour.** Green and red already mean good and bad in this app; a red bar would look like a judgement when it is only a count.
+- **Check question I got wrong:** the latest run for a quarter is rejected and an older one was approved: what does the dashboard show? I answered about the workflow blocking. Right answer: it shows the older approved run, which is only half right, because a manager would assume all is fine. So the dashboard warns "a later run was rejected". **A dashboard must not hide bad news.**
+
+**Learned (trace):**
+- **I asked for a diagram; what I wanted was a trace.** The first version was a fixed list of steps. I said it should "follow the flow": what actually happened in a run, with time, tools and a summary per step. A **map** shows what exists; a **trace** shows what happened.
+- **Each step writes its own line while the run happens**, and the line is saved with the run. Reading a trace later never re-runs anything.
+- **A wrapper** (`traced`) adds timing to all 7 steps without repeating code in each one.
+- **`operator.add` on the state's `trace`** tells LangGraph to add each new line to the list instead of replacing it (a **reducer**).
+- **A person's step is measured by waiting time**, not work time: the gap since the previous step finished.
+- **Refused answers are evidence too.** The trace caught my own first review ("alice answered and was asked again: w2.box_1 is not a number…") and alice's blocked sign-off.
+- **The steps and their order are read from LangGraph** (`get_graph()`), and a test fails if a step is added without a description. A test keeps the picture honest, not a reminder.
+- **Real numbers from my run (gpt-4o):** Explain 3.9 s, Summarize 1.7 s, Compute 39 ms, the rest under 50 ms. The AI is almost all of the machine time (5.6 of 5.7 s). That is where cost and delay live, and one more reason the math is done by code.
+
+**Bugs found by looking at the real screen (not by tests):**
+1. **Diagram text misaligned.** Graphviz placed the text using one font and Streamlit drew it with another. Fix: draw the steps as HTML cards, so the browser both measures and draws. Only the drawing changed; the tested data underneath stayed.
+2. **"Waited 11 d 21 h".** The wait was measured from the last ingest, a separate command that ran days earlier. Fix: waits are measured only between a run's own steps.
+3. **Extract shown last as "Not reached yet".** The run had started before tracing existed, so Extract had no line. Fix: such steps are shown in place as "Ran before tracing was added".
+4. **Chart labels cut off.** Fix: bars drawn as rows with the full name and the number.
+- Lesson: adding a feature to a system with **old saved data** needs a plan for that data (old runs have no trace). And for anything visual, a passing test proves the numbers, not the look: someone has to look.
+- A module imported by `app.py` needs a Streamlit **restart**; a change in `app.py` itself only needs a refresh. I was shown the old diagram until I restarted.
+- Most of these changes were applied directly by Claude after testing in a scratch copy; I checked each on screen and sent screenshots, which is how bugs 1 to 4 were found.
+
+### Step 5: One database connection, and two people answering the same run (`agent/runner.py`, `app.py`)
+**What:**
+- `start_run`, `run_status`, `resume_run`, `list_runs` take an optional `saver` (the database connection). The app opens **one** with `@st.cache_resource` and passes it in every time; the CLI passes nothing and gets a new one, as before.
+- Every snapshot of a run has a **`version`**: a fingerprint of where the run stands and what it is asking.
+- `resume_run(..., expected=version)` refuses an answer written for an older version with `StaleAnswerError`. A lock (`ANSWERING`) makes "check the version, then continue the run" one unit.
+- The app remembers which version each person was last shown (`st.session_state["seen"]`), sends it with their answer, and tells them when the run changed under them.
+- 4 new tests → **205 passed.**
+
+**Learned:**
+- **Streamlit reruns the whole script on every click**, so anything created in the script is created again each time. `st.cache_resource` = "make this once, hand back the same object on every rerun". Right for connections; in a CLI the process ends, so the problem never showed.
+- **Optimistic locking:** don't lock the run while someone looks at it; let everyone work, and check at the moment of saving whether the run is still as they saw it. "Optimistic" = we assume clashes are rare.
+- **Lost update** = the bug it prevents: two people read the same state, both answer, and one answer silently wins or is misread. Before this step bob's late answer vanished with no message.
+- **The version had to include the request, not only the checkpoint id.** Claude's first version used LangGraph's checkpoint id. Replaying two people in a test showed a gap: a **refused** answer (alice blocked by maker-checker) changes the request but not the checkpoint id. Lesson: test the scenario, not just the function.
+- **Honest limit:** the lock works inside one running copy of the app. Several copies on several servers would need the check inside the database.
+- **`ImportError: cannot import name 'StaleAnswerError'`** after the change: Streamlit had reloaded the new `app.py` but still held the old `runner.py`. Fix: stop and restart. Rule: only `app.py` changed → refresh; any other file → restart.
+- **Tested by hand with two browser windows** (alice and bob on the same run): the second person got "This run changed since you last looked: someone else answered it." ✅
+
+**Phase 6 in 60 seconds:** `uv run streamlit run src/taxagent/app.py` opens a three-tab app that is a thin shell over the same functions the CLI uses, so no rule lives in the screen. **Runs:** a reviewer types the values the machine could not read, beside the cropped source page, with the file's hash checked before it is shown; a second person signs off, seeing the reviewer's typed values, the AI's cited explanations and the evidence, with no default choice; a finished run opens read-only, rebuilt from saved state to show exactly what was signed. **Dashboard:** one official result per quarter (the latest approved run), every check as pass or fail, counts by category decided by code, and a warning if a later run was rejected. **How it works:** a trace of any run, step by step in the order it happened, with tools, time, what each step did and decided, including answers that were refused. One database connection serves the whole app, and an answer written for a state that has since changed is refused, so two people can't silently overwrite each other. On a real gpt-4o run the AI steps took 5.6 of 5.7 seconds of machine time.
