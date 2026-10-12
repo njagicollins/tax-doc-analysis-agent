@@ -5,6 +5,7 @@ any line and the hashes after it stop matching, so tampering shows.
 """
 
 import json
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from taxagent.ingestion.raw_store import sha256_of
 
 AUDIT_PATH = Path("data/audit/audit.jsonl")
 FIRST = "0" * 64  # what the first entry points back to: there is nothing before it
+# One writer at a time: two entries written at once would both follow the same entry
+WRITING = threading.Lock()
 
 
 def entry_hash(entry: dict) -> str:
@@ -31,19 +34,20 @@ def append_event(
     event: str, actor: str, details: dict, path: Path = AUDIT_PATH
 ) -> dict:
     """Add one event to the end of the log and return the saved entry."""
-    entries = read_entries(path)
-    entry = {
-        "seq": len(entries) + 1,
-        "at": datetime.now(UTC).isoformat(),
-        "event": event,
-        "actor": actor,
-        "details": details,
-        "prev_hash": entries[-1]["hash"] if entries else FIRST,
-    }
-    entry["hash"] = entry_hash(entry)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:  # "a" = append only
-        f.write(json.dumps(entry) + "\n")
+    with WRITING:
+        entries = read_entries(path)
+        entry = {
+            "seq": len(entries) + 1,
+            "at": datetime.now(UTC).isoformat(),
+            "event": event,
+            "actor": actor,
+            "details": details,
+            "prev_hash": entries[-1]["hash"] if entries else FIRST,
+        }
+        entry["hash"] = entry_hash(entry)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:  # "a" = append only
+            f.write(json.dumps(entry) + "\n")
     return entry
 
 

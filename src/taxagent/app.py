@@ -100,7 +100,7 @@ with st.sidebar:
     quarter = st.text_input("Quarter", "2026Q2")
     if st.button("Start a run"):
         with st.spinner("Extracting..."):
-            started = start_run(quarter, saver=saver())
+            started = start_run(quarter, saver=saver(), actor=user)
         st.success(f"Started {started['run_id']}")
 
 

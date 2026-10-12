@@ -10,6 +10,7 @@ import httpx2
 from dotenv import load_dotenv
 
 from taxagent.agent.runner import resume_run, run_status, start_run
+from taxagent.audit.log import append_event
 from taxagent.compute.run import run_compute
 from taxagent.extraction.run import REVIEW_THRESHOLD, run_extraction
 from taxagent.ingestion.pipeline import ingest
@@ -37,6 +38,17 @@ def run_ingest(quarter: str) -> None:
         result = ingest(quarter, sources)
     except httpx2.ConnectError:
         raise SystemExit(f"Cannot reach ADP at {base_url}. Is the server running?")
+    append_event(
+        "files_ingested",
+        "cli",
+        {
+            "ingest_run": result.run_id,
+            "quarter": quarter,
+            "new": len(result.new),
+            "unchanged": len(result.unchanged),
+            "changed": result.changed,  # by name: a changed document is worth a look
+        },
+    )
 
     print(
         f"Run {result.run_id}: {len(result.new)} new, "
@@ -124,7 +136,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "compute":
         run_compute_command(args.quarter)
     elif args.command == "run":
-        show_run(start_run(args.quarter))
+        show_run(start_run(args.quarter, actor="cli"))
     elif args.command == "status":
         show_run(run_status(args.run))
     elif args.command == "resume":
