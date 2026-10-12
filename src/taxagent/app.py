@@ -19,6 +19,8 @@ from taxagent.agent.runner import (
     start_run,
 )
 from taxagent.agent.trace import duration, ingest_line, with_waits
+from taxagent.audit.log import read_entries, verify
+from taxagent.audit.view import audit_rows, made_with, run_of
 from taxagent.ingestion.manifest import read_rows
 from taxagent.ingestion.raw_store import TamperedFileError
 from taxagent.review.dashboard import (
@@ -585,10 +587,39 @@ def how_it_works_page() -> None:
         show_trace(runs[chosen])
 
 
-runs_tab, dashboard_tab, how_tab = st.tabs(["Runs", "Dashboard", "How it works"])
-with runs_tab:
-    runs_page()
-with dashboard_tab:
-    dashboard_page()
-with how_tab:
-    how_it_works_page()
+def audit_page() -> None:
+    entries = read_entries()
+    problems = verify()
+    if problems:
+        st.error(
+            "The audit log has been changed. Do not rely on it until this is explained."
+        )
+        for problem in problems:
+            st.markdown(f"- {problem}")
+    else:
+        st.success(
+            f"The log is intact: {len(entries)} entries, each following the one before it."
+        )
+    if not entries:
+        return
+    st.caption(
+        f"Newest hash: `{entries[-1]['hash']}`. Kept somewhere else, it proves later "
+        "that nothing was cut off the end of the log."
+    )
+
+    run_ids = sorted({run_of(entry) for entry in entries} - {None}, reverse=True)
+    chosen = st.selectbox(
+        "Show", [None, *run_ids], format_func=lambda run_id: run_id or "Everything"
+    )
+    st.dataframe(audit_rows(entries, chosen), hide_index=True)
+    produced_by = made_with(entries, chosen) if chosen else None
+    if produced_by:
+        st.markdown("**What produced this run** (code, prompts, models, settings)")
+        st.json(produced_by)
+
+
+runs_tab, dashboard_tab, how_tab, audit_tab = st.tabs(
+    ["Runs", "Dashboard", "How it works", "Audit"]
+)
+with audit_tab:
+    audit_page()

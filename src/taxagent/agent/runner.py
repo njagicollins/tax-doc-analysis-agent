@@ -106,7 +106,7 @@ def audit_progress(run: dict, already: int) -> None:
     """
     run_id = run["run_id"]
     for line in run["trace"][already:]:
-        details = {key: line[key] for key in ("step", "did", "notes")}
+        details = {key: line[key] for key in ("step", "did", "notes", "finished_at")}
         append_event("step_finished", "system", {"run_id": run_id, **details})
     if run["pending"] is None:
         append_event(

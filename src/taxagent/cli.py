@@ -10,7 +10,7 @@ import httpx2
 from dotenv import load_dotenv
 
 from taxagent.agent.runner import resume_run, run_status, start_run
-from taxagent.audit.log import append_event
+from taxagent.audit.log import AUDIT_PATH, append_event, read_entries, verify
 from taxagent.compute.run import run_compute
 from taxagent.extraction.run import REVIEW_THRESHOLD, run_extraction
 from taxagent.ingestion.pipeline import ingest
@@ -84,6 +84,22 @@ def run_compute_command(quarter: str) -> None:
         print(f"  [{finding.kind}] {finding.summary}")
 
 
+def run_audit(last_hash: str | None) -> None:
+    entries = read_entries()
+    problems = verify(last_hash=last_hash)
+    print(f"{len(entries)} entries in {AUDIT_PATH.as_posix()}")
+    if problems:
+        for problem in problems:
+            print(f"  PROBLEM: {problem}")
+        raise SystemExit(1)  # a non-zero exit code: other programs can tell it failed
+    print("Intact: every entry follows the one before it.")
+    if entries:
+        print(f"Last hash: {entries[-1]['hash']}")
+        print(
+            "Keep it somewhere else; check later with: taxagent audit --last-hash ..."
+        )
+
+
 def show_run(run: dict) -> None:
     print(f"Run {run['run_id']}: {run['status']}")
     if run["pending"] is None:
@@ -127,6 +143,10 @@ def main(argv: list[str] | None = None) -> None:
     resume_command = commands.add_parser("resume", help="Answer a paused run")
     resume_command.add_argument("--run", required=True)
     resume_command.add_argument("--answer", required=True, type=Path)
+    audit_command = commands.add_parser(
+        "audit", help="Check that the audit log has not been changed"
+    )
+    audit_command.add_argument("--last-hash", help="The newest hash, kept elsewhere")
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
@@ -142,3 +162,5 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "resume":
         answer = json.loads(args.answer.read_text(encoding="utf-8"))
         show_run(resume_run(args.run, answer))
+    elif args.command == "audit":
+        run_audit(args.last_hash)

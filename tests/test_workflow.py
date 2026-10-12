@@ -405,6 +405,8 @@ def test_everything_a_run_does_is_written_to_the_audit_log(world):
     assert {entry["details"]["run_id"] for entry in log} == {run["run_id"]}
     assert log[8]["details"]["problems"][0].startswith("maker-checker: alice")
     assert log[-1]["details"]["status"] == "approved"
+    assert log[1]["details"]["finished_at"] <= log[1]["at"]  # done, then written down
+
     assert verify() == []  # and the chain is intact
 
 
