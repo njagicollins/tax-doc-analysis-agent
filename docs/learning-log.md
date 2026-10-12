@@ -1181,3 +1181,15 @@ I looked at the sign-off screen and asked for: no huge blank gap, a way to reope
 - **Tested by hand with two browser windows** (alice and bob on the same run): the second person got "This run changed since you last looked: someone else answered it." ✅
 
 **Phase 6 in 60 seconds:** `uv run streamlit run src/taxagent/app.py` opens a three-tab app that is a thin shell over the same functions the CLI uses, so no rule lives in the screen. **Runs:** a reviewer types the values the machine could not read, beside the cropped source page, with the file's hash checked before it is shown; a second person signs off, seeing the reviewer's typed values, the AI's cited explanations and the evidence, with no default choice; a finished run opens read-only, rebuilt from saved state to show exactly what was signed. **Dashboard:** one official result per quarter (the latest approved run), every check as pass or fail, counts by category decided by code, and a warning if a later run was rejected. **How it works:** a trace of any run, step by step in the order it happened, with tools, time, what each step did and decided, including answers that were refused. One database connection serves the whole app, and an answer written for a state that has since changed is refused, so two people can't silently overwrite each other. On a real gpt-4o run the AI steps took 5.6 of 5.7 seconds of machine time.
+
+**Two check questions I didn't know and asked for the answers:**
+- **The test asserts the rebuilt record equals what bob was shown (`record[part] == seen[part]`). What if it failed?**
+  - The "record" page would show something different from what the signer actually saw. Then nobody can prove what bob approved: he could say "that explanation wasn't on my screen", and we couldn't show otherwise. A signature is only worth something if you can show **exactly** what was signed.
+  - It can only fail if something changes the saved state after sign-off, or if the function that builds the request stops being a pure function of that state. The test guards both.
+- **Why not lock the run for alice the moment she opens the review page?**
+  - That is **pessimistic locking**: assume a clash will happen and block everyone else up front.
+  - Problem 1: opening a page is not a promise to finish. Alice opens it and goes to lunch, or closes her laptop: the run is stuck and bob can't help.
+  - Problem 2: so you need a timeout, a way to break locks, and a way to know she is still there. A web page can't reliably tell the server "I was closed".
+  - Problem 3: clashes are rare here (a few reviewers, a handful of runs), so everyone would pay that cost every time to prevent something that almost never happens.
+  - Optimistic locking costs nothing until a clash really happens, and then the second person loses one click and is told why.
+  - When pessimistic **is** right: clashes are frequent, or redoing the work is very expensive (editing a long document for an hour).
