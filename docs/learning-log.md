@@ -1193,3 +1193,5 @@ I looked at the sign-off screen and asked for: no huge blank gap, a way to reope
   - Problem 3: clashes are rare here (a few reviewers, a handful of runs), so everyone would pay that cost every time to prevent something that almost never happens.
   - Optimistic locking costs nothing until a clash really happens, and then the second person loses one click and is told why.
   - When pessimistic **is** right: clashes are frequent, or redoing the work is very expensive (editing a long document for an hour).
+
+**✅ Phase 6 complete** (PR #9 merged).
