@@ -35,6 +35,7 @@ class RunState(TypedDict, total=False):
     """Everything the run knows. Plain JSON-friendly data, so it can be saved."""
 
     quarter: str
+    made_with: dict  # code version, prompts, models and settings behind this run
     review_items: list[dict]
     reviewer: str
     corrections: list[dict]

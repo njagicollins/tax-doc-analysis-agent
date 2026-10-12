@@ -424,3 +424,19 @@ def test_an_answer_that_came_too_late_is_written_down_too(world):
 
     last = read_entries()[-1]
     assert (last["event"], last["actor"]) == ("answer_out_of_date", "bob")
+
+
+def test_a_run_remembers_what_it_was_made_with(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+
+    made_with = run["made_with"]
+    assert made_with["models"] == {"small": "tiny-model", "large": "big-model"}
+    assert "explain_finding.v1.md" in made_with["prompts"]
+    assert read_entries()[0]["details"]["made_with"] == made_with  # in the log too
+
+    run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+    resume_run(run["run_id"], sign_off("bob"), make_llm=fake_llm)
+    saved = json.loads(
+        Path(f"data/results/2026Q2/{run['run_id']}.json").read_text(encoding="utf-8")
+    )
+    assert saved["made_with"] == made_with  # and in the result file

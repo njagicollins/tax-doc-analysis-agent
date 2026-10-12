@@ -18,6 +18,7 @@ from taxagent.agent.llm import LLM, llm_from_env
 from taxagent.agent.roster import load_roster
 from taxagent.agent.workflow import build_workflow, sign_off_request
 from taxagent.audit.log import append_event
+from taxagent.audit.provenance import provenance
 from taxagent.ingestion.manifest import new_run_id
 
 RUNS_DIR = Path("data/runs")
@@ -75,6 +76,7 @@ def snapshot(workflow, run_id: str) -> dict:
     return {
         "run_id": run_id,
         "quarter": state.values.get("quarter"),
+        "made_with": state.values.get("made_with"),
         "status": state.values.get("status"),
         "version": fingerprint(
             state.config["configurable"].get("checkpoint_id"), pending
@@ -120,9 +122,13 @@ def start_run(
 ) -> dict:
     run_id = f"{quarter}-{new_run_id()}"
     saver = saver or checkpointer()
-    workflow = build_workflow(make_llm(load_roster(quarter)), saver)
-    append_event("run_started", actor, {"run_id": run_id, "quarter": quarter})
-    workflow.invoke({"quarter": quarter}, config(run_id))
+    llm = make_llm(load_roster(quarter))
+    workflow = build_workflow(llm, saver)
+    made_with = provenance(llm.models)
+    details = {"run_id": run_id, "quarter": quarter, "made_with": made_with}
+    append_event("run_started", actor, details)
+    # Saved in the run too, so the result file carries what produced it
+    workflow.invoke({"quarter": quarter, "made_with": made_with}, config(run_id))
     run = snapshot(workflow, run_id)
     audit_progress(run, already=0)
     return run
