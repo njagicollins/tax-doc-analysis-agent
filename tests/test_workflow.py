@@ -8,10 +8,18 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from synthetic.__main__ import main as generate_everything
+from taxagent.agent import runner
 from taxagent.agent import workflow as workflow_module
 from taxagent.agent.explain import Claim, Explanation
 from taxagent.agent.roster import load_roster
-from taxagent.agent.runner import list_runs, resume_run, run_status, start_run
+from taxagent.agent.runner import (
+    StaleAnswerError,
+    checkpointer,
+    list_runs,
+    resume_run,
+    run_status,
+    start_run,
+)
 from taxagent.agent.summary import Summary
 from taxagent.agent.workflow import build_workflow
 from taxagent.extraction.run import run_extraction
@@ -314,3 +322,58 @@ def test_a_run_leaves_a_trace_of_what_each_step_did_and_decided(world):
     assert refused.startswith("alice answered and was asked again: maker-checker")
     assert decisions == ["F1: accept", "F2: accept"]
     assert all(line["seconds"] >= 0 for line in run["trace"])
+
+
+def test_one_connection_can_serve_every_call(world, monkeypatch):
+    saver = checkpointer()
+
+    def no_more_connections():
+        raise AssertionError("a second connection was opened")
+
+    monkeypatch.setattr(runner, "checkpointer", no_more_connections)
+
+    run = start_run("2026Q2", make_llm=fake_llm, saver=saver)
+    assert run_status(run["run_id"], saver)["pending"]["step"] == "review"
+    run = resume_run(
+        run["run_id"], full_review("alice"), make_llm=fake_llm, saver=saver
+    )
+    assert [r["run_id"] for r in list_runs(saver)] == [run["run_id"]]
+
+
+def test_the_version_changes_only_when_the_run_changes(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    assert (
+        run_status(run["run_id"])["version"] == run["version"]
+    )  # reading changes nothing
+
+    after = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+
+    assert after["version"] != run["version"]
+
+
+def test_an_answer_written_for_an_old_state_is_refused(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    both_saw = run["version"]  # alice and bob both have the review page open
+    resume_run(
+        run["run_id"], full_review("alice"), make_llm=fake_llm, expected=both_saw
+    )
+    before = run_status(run["run_id"])
+
+    with pytest.raises(StaleAnswerError):
+        resume_run(
+            run["run_id"], full_review("bob"), make_llm=fake_llm, expected=both_saw
+        )
+
+    after = run_status(run["run_id"])
+    assert after["version"] == before["version"]  # bob's late answer changed nothing
+    assert after["pending"]["step"] == "sign_off" and "problems" not in after["pending"]
+
+
+def test_a_refused_answer_also_changes_the_version(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+
+    refused = resume_run(run["run_id"], sign_off("alice"), make_llm=fake_llm)
+
+    assert refused["pending"]["problems"]  # maker-checker: asked again
+    assert refused["version"] != run["version"]  # so other open pages are out of date

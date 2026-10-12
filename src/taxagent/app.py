@@ -10,7 +10,14 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from taxagent.agent.diagram import HUMAN, describe, pipeline, workflow_order
-from taxagent.agent.runner import list_runs, resume_run, run_status, start_run
+from taxagent.agent.runner import (
+    StaleAnswerError,
+    checkpointer,
+    list_runs,
+    resume_run,
+    run_status,
+    start_run,
+)
 from taxagent.agent.trace import duration, ingest_line, with_waits
 from taxagent.ingestion.manifest import read_rows
 from taxagent.ingestion.raw_store import TamperedFileError
@@ -53,6 +60,39 @@ load_dotenv()
 st.set_page_config(page_title="Tax document analysis", layout="wide")
 st.title("Tax document analysis")
 
+
+@st.cache_resource
+def saver():
+    """One database connection for as long as the app runs, shared by every click.
+
+    Without the cache, each rerun of this script would open another connection
+    and never close it.
+    """
+    return checkpointer()
+
+
+def answer(run: dict, reply: dict, doing: str) -> None:
+    """Send a person's answer, unless the run changed after their page was drawn."""
+    seen = st.session_state.setdefault("seen", {})
+    try:
+        with st.spinner(doing):
+            resume_run(
+                run["run_id"],
+                reply,
+                saver=saver(),
+                expected=seen.get(run["run_id"], run["version"]),
+            )
+    except StaleAnswerError:
+        st.error(
+            "Your answer was not used: this run changed after you opened it, because "
+            "someone else answered first. Check what the page shows now, then answer "
+            "again if it still applies."
+        )
+        return
+    st.session_state["answered"] = True  # the change we are about to see is our own
+    st.rerun()
+
+
 with st.sidebar:
     user = st.selectbox("You are", PEOPLE)
     st.caption("Simulated login. In production this comes from Entra ID.")
@@ -60,7 +100,7 @@ with st.sidebar:
     quarter = st.text_input("Quarter", "2026Q2")
     if st.button("Start a run"):
         with st.spinner("Extracting..."):
-            started = start_run(quarter)
+            started = start_run(quarter, saver=saver())
         st.success(f"Started {started['run_id']}")
 
 
@@ -122,9 +162,11 @@ def review_form(run: dict) -> None:
         submitted = st.form_submit_button(f"Submit review as {user}")
 
     if submitted:
-        with st.spinner("Checking your values, then computing and explaining..."):
-            resume_run(run["run_id"], {"reviewer": user, "corrections": corrections})
-        st.rerun()
+        answer(
+            run,
+            {"reviewer": user, "corrections": corrections},
+            "Checking your values, then computing and explaining...",
+        )
 
 
 def evidence_table(evidence: list[dict]) -> list[dict]:
@@ -243,15 +285,13 @@ def sign_off_form(run: dict) -> None:
         submitted = st.form_submit_button(f"Sign off as {user}")
 
     if submitted:
-        answer = {
+        reply = {
             "signer": user,
             "decisions": {k: v for k, v in decisions.items() if v is not None},
             "approve": None if verdict is None else verdict == "approve",
             "note": note,
         }
-        with st.spinner("Recording your sign-off..."):
-            resume_run(run["run_id"], answer)
-        st.rerun()
+        answer(run, reply, "Recording your sign-off...")
 
 
 def show_record(run: dict) -> None:
@@ -282,7 +322,7 @@ def show_record(run: dict) -> None:
 
 
 def runs_page() -> None:
-    runs = {run["run_id"]: run for run in list_runs()}
+    runs = {run["run_id"]: run for run in list_runs(saver())}
     if not runs:
         st.info("No runs yet. Start one from the sidebar.")
         return
@@ -294,7 +334,16 @@ def runs_page() -> None:
         return f"{dot} {run_id}  ·  {run['status']}  ·  waiting for: {waiting}"
 
     run_id = st.selectbox("Run", list(runs), format_func=label)
-    run = run_status(run_id)
+    run = run_status(run_id, saver())
+
+    # Has this run changed since this person last saw it, and not by their own answer?
+    seen = st.session_state.setdefault("seen", {})
+    own_answer = st.session_state.pop("answered", False)
+    if seen.get(run_id) not in (None, run["version"]) and not own_answer:
+        st.warning(
+            "This run changed since you last looked: someone else answered it. "
+            "The page now shows where it stands."
+        )
 
     st.badge(run["status"], color=colour_of(run["status"]))
     if run["pending"] is None:
@@ -309,6 +358,7 @@ def runs_page() -> None:
     else:
         st.subheader(f"Waiting for: {run['pending']['step']}")
         st.json(run["pending"])
+    seen[run_id] = run["version"]  # what this person has now been shown
 
 
 def bars_html(counts: dict[str, int]) -> str:
@@ -522,7 +572,7 @@ def show_trace(run: dict) -> None:
 
 
 def how_it_works_page() -> None:
-    runs = {run["run_id"]: run for run in list_runs()}
+    runs = {run["run_id"]: run for run in list_runs(saver())}
     chosen = st.selectbox(
         "Follow a run",
         [None, *runs],
