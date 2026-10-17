@@ -82,7 +82,7 @@ docs/                 architecture.md, plan.md
 - [X] Phase 4: deterministic compute
 - [X] Phase 5: LangGraph agent
 - [X] Phase 6: Streamlit app
-- [ ] Phase 7: audit + evals
+- [X] Phase 7: audit + evals
 - [ ] Phase 8: polish + demo walkthrough
 
 Update this checklist as phases are completed.
