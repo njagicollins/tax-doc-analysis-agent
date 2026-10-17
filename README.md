@@ -14,33 +14,37 @@ Built on synthetic data only. Runs locally; designed to move to Azure.
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"primaryColor": "#1B2A3C", "primaryTextColor": "#E8EEF4", "primaryBorderColor": "#5B7083", "lineColor": "#7C93A8", "clusterBkg": "#0F1B2A", "clusterBorder": "#2DD4BF", "titleColor": "#2DD4BF", "edgeLabelBackground": "#0F1B2A"}}}%%
 flowchart TD
-    sources[("Sources<br/>ADP documents,<br/>payroll database")]
-    ingest["Ingest<br/>copy every file in,<br/>record its hash"]
-    raw[("Raw store<br/>write-once evidence")]
-    sources --> ingest --> raw --> extract
+    subgraph frame [" "]
+        direction TB
+        sources[("Sources<br/>ADP documents,<br/>payroll database")]
+        ingest["Ingest<br/>copy every file in,<br/>record its hash"]
+        raw[("Raw store<br/>write-once evidence")]
+        sources --> ingest --> raw --> extract
 
-    subgraph workflow ["Workflow: saved after every step"]
-        extract["Extract<br/>read each value and<br/>where it came from"]
-        human_review(["Review<br/>a person types what<br/>the machine can't read"])
-        compute["Compute<br/>plain code checks<br/>every number"]
-        explain["Explain<br/>AI drafts, citing<br/>its evidence"]
-        summarize["Summarize<br/>AI drafts<br/>the summary"]
-        sign_off(["Sign-off<br/>a second person<br/>decides"])
-        finalize["Finalize<br/>save everything<br/>that was decided"]
-        extract -- "unreadable" --> human_review
-        human_review --> compute --> explain --> summarize --> sign_off --> finalize
+        subgraph workflow ["Workflow: saved after every step"]
+            direction TB
+            extract["Extract<br/>read each value and<br/>where it came from"]
+            human_review(["Review<br/>a person types what<br/>the machine can't read"])
+            compute["Compute<br/>plain code checks<br/>every number"]
+            explain["Explain<br/>AI drafts, citing<br/>its evidence"]
+            summarize["Summarize<br/>AI drafts<br/>the summary"]
+            sign_off(["Sign-off<br/>a second person<br/>decides"])
+            finalize["Finalize<br/>save everything<br/>that was decided"]
+            extract -- "unreadable" --> human_review
+            human_review --> compute --> explain --> summarize --> sign_off --> finalize
+        end
+
+        subgraph records ["What it leaves behind"]
+            direction LR
+            results[("Results<br/>dashboard")]
+            audit[("Audit log<br/>every action,<br/>hash-chained")]
+            langsmith{{"LangSmith<br/>optional trace"}}
+        end
+
+        finalize --> results
+        workflow -.-> audit
+        workflow -.-> langsmith
     end
-
-    subgraph records ["What it leaves behind"]
-        direction LR
-        results[("Results<br/>dashboard")]
-        audit[("Audit log<br/>every action,<br/>hash-chained")]
-        langsmith{{"LangSmith<br/>optional trace"}}
-    end
-
-    finalize --> results
-    workflow -.-> audit
-    workflow -.-> langsmith
 
     classDef person fill:#F59E0B,stroke:#FCD34D,color:#1B2A38,stroke-width:2px
     classDef ai fill:#9085E9,stroke:#C4BDF8,color:#0F1B2A,stroke-width:2px
@@ -52,6 +56,7 @@ flowchart TD
     class sources,raw,results,audit store
     class ingest,extract,compute,finalize step
     class langsmith outside
+    style frame fill:#0F1B2A,stroke:#0F1B2A
 ```
 
 Orange: the run waits for a person. Violet: the AI drafts text. Dark: plain code. Teal outline: data that is kept. The app's **How it works** tab draws the same steps from the code itself, and shows the trace of any real run.
