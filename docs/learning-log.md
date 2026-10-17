@@ -1195,3 +1195,93 @@ I looked at the sign-off screen and asked for: no huge blank gap, a way to reope
   - When pessimistic **is** right: clashes are frequent, or redoing the work is very expensive (editing a long document for an hour).
 
 **✅ Phase 6 complete** (PR #9 merged).
+
+---
+
+## Phase 7: Audit and evals
+
+**Why this phase:** the system worked, but couldn't answer two questions about itself. An **auditor** asks "can you prove what happened, and that nobody changed the record afterwards?" An **engineer** asks "how good is it, as a number, and did my last change make it worse?" Phase 7 answers both.
+
+**From here on I paste all the code myself** (I asked for this at the start of the phase). Claude tests in a scratch copy first, hands over the exact code, then compares my files with the tested versions.
+
+**Q: Is audit the same as tracing (observability)?** No.
+- **Observability** = being able to tell what a running system is doing from the outside: logs, metrics (numbers over time) and traces.
+- **Tracing** is for engineers: why was it slow, where did it fail. Can be sampled, kept for weeks.
+- **An audit log** is for auditors: who did what and when, provably. Must be tamper-evident, complete, kept for years.
+- Tracing helps you **fix** the system; the audit log lets you **prove** what happened.
+- **Our observability tool** is the small trace we built in Phase 6. Tools like **LangSmith**, **Langfuse** (open source, self-hostable) or **OpenTelemetry + Azure Monitor** add every prompt and response, tokens, cost, search and alerts. Caution for tax data: a tracing tool records prompts and state, so sending it to a third-party cloud is a data decision. **I chose to add LangSmith in Phase 8.**
+
+### Step 1: Hash-chained audit log (`audit/log.py`)
+**What:** `append_event(event, actor, details)` writes one JSON line; each entry stores the **hash of the entry before it**. `verify()` returns a list of problems (empty = intact). 7 tests → **212 passed**.
+**Learned:**
+- Change, remove or reorder one entry and every link after it breaks.
+- `entry_hash` leaves out the `hash` field itself; `sort_keys=True` makes the same entry always give the same hash.
+- `verify` says **which** entry is wrong, not just True/False.
+- **Limit:** entries cut off the **end** can't be noticed, because nothing after them disagrees. Fix: keep the newest hash somewhere else (`verify(last_hash=...)`).
+- **Check question I didn't know (asked for the answer): how could someone with full access defeat the chain?** Change an entry and **recompute every hash after it**: no secret is involved, so the chain is valid again. The chain gives **tamper evidence**, not tamper resistance. Real protection = an outside copy of the newest hash that the writer can't change: write-once storage (e.g. Azure immutable blob storage), another team's system, or digital signatures with a key in a vault. = **separation of duties**, maker-checker applied to the log itself.
+- My slip: a file that looked pasted but was empty because it wasn't saved. Watch for the unsaved dot on the editor tab.
+
+### Step 2: Writing events (`agent/runner.py`, `cli.py`)
+**What:** events `files_ingested`, `run_started`, `answer_received`, `answer_refused`, `answer_out_of_date`, `step_finished`, `run_finished`. A lock (`WRITING`) so two entries can't both follow the same entry. **214 passed.**
+**Learned:**
+- Write the log at the **doorway** (`start_run`, `resume_run`, the ingest command), never inside workflow steps: a paused step **re-runs from its start** when resumed, so anything written there would be written twice.
+- **Record first, then act:** `answer_received` is written before the workflow uses the answer, so a crash can't erase that alice answered.
+- **Attempts are logged, not only successes:** alice's blocked sign-off and bob's late answer leave entries.
+- Each `step_finished` keeps the step's own `finished_at`: `at` is when the entry was **written**, which can be later. A timestamp that means something slightly different from what the reader assumes is a trap.
+- Honest gap: the ingest event has no test (the command needs the mock ADP server).
+
+### Step 3: Provenance (`audit/provenance.py`)
+**What:** every run records what produced it: git commit (+ uncommitted changes), a hash of each prompt file, model names, thresholds. Saved in the run, the result file and the `run_started` audit entry. **220 passed.**
+**Learned:**
+- **Provenance** = where something came from. Four things can change a result: code, prompts, models, settings.
+- The prompt **name** says "v1"; the **hash** proves the text is still what v1 was.
+- No git on a server → "unknown", never a crash.
+- **Check question, answered right:** is the model name enough to repeat a run a year later? No: the provider can update or retire the model behind the same name. Plus: pin a **dated** model name in production; and even then the model isn't word-for-word repeatable, so we **save the output**. Provenance says what produced it; the saved text proves what it said.
+
+### Step 4: `taxagent audit` and the Audit tab (`audit/view.py`)
+**What:** `taxagent audit [--last-hash ...]` verifies the log and exits with code 1 if it was changed. The Audit tab shows intact/changed, every event as one sentence, and what produced a chosen run. **233 passed.**
+**Learned:**
+- **Exit codes:** 0 = success, anything else = failure, so a scheduled job can react without a person reading the output.
+- `match ... case` = choose what to do by the event's name.
+- **My paste mistake:** replacing the last lines of `app.py` also deleted the three `with ..._tab:` blocks, so three tabs were blank, and **233 tests still passed** because no test opens the app. The thin shell is thin, not zero. (Claude now gives the whole final block for edits near the end of a file.)
+
+### Step 5: Detection eval (`evals/detection.py`)
+**What:** does the pipeline raise every planted error from `data/golden/golden.json`, and nothing else? `uv run python -m evals` → 4/4 found, **recall 100%, precision 100%**. **241 passed.**
+**Learned:**
+- **Test vs eval:** a test asks "does the code do what I wrote?"; an eval asks "how good is the system at its job, as a number?" and needs an **answer key**.
+- **Recall** = of the real errors, how many we found. **Precision** = of the alarms raised, how many were real. You need both: flagging everything gives perfect recall and is useless.
+- One planted error can cause several alarms (E013 missing → 3 findings), so each error has signals it **must** raise and side effects it **may** raise. A side effect alone doesn't count as finding the error ("smoke, not the fire").
+- The eval is tested **for failing** (a missed error, a false alarm), not only passing: an eval that can't fail measures nothing. It extracts into a temporary folder: measuring must not change saved data.
+- **Our 100% is like setting an exam and then sitting it:** we wrote the checks knowing the planted errors.
+- **Check question I didn't know (asked): how would a real team build a trustworthy answer key?** From **past quarters already worked by hand**; labelled by people who **didn't build** the system; **two labellers** working independently, with disagreements settled by a third; **part kept hidden** for the final score (against overfitting); and every miss a person catches gets **added** to it.
+- My slips: stray keystrokes `ffyghjl` in `audit/view.py` (ruff: F821 undefined name); forgot `evals/__main__.py` → "'evals' is a package and cannot be directly executed".
+
+### Step 6: Extraction eval (`evals/extraction.py`)
+**What:** is every value read exactly as its document shows it? The generator rebuilds what each document shows. Real data: 732 values, **98.4% correct, 12 unreadable** (E017's six W-2 boxes, twice), **0 confidently wrong, 0 invented**. **248 passed.**
+**Learned:**
+- Each eval measures one job: reading the 941 typo as printed is **correct extraction**; catching it is the checks' job.
+- Not all mistakes are equal: unreadable and wrong-but-flagged go to a person (safe); **confidently wrong** flows into the math unseen (dangerous); **invented** is the worst.
+- "98.4% accuracy" sounded like 1.6% wrong; in fact **none** were wrong, they were honestly unreadable. Breaking accuracy into outcomes makes the number honest.
+- `Decimal(63250) == Decimal("63250.00")`: money compares by value.
+- **Check question, answered right:** if a change guessed the blurry scan and got 11 of 12 right, accuracy rises to about 99.9% but the system is **worse**: "confidently wrong" goes from 0 to 1. Rule: never present a guess as a fact (a low-confidence guess still goes to a person).
+
+### Step 7: Explanation eval (`evals/explanations.py`, `--llm`)
+**What:** the real model explains each of the 5 findings **3 times**; each answer is graded right cause / honest: can't tell / too cautious / wrong cause, plus grounded, consistent, names leaked, seconds. Runs only with `--llm` (paid); the tests use the fake AI. **255 passed.**
+**Learned:**
+- "Honest: can't tell" is a good answer only when the evidence really can't show the cause (F1's totals, the side effects). For E007 the bonus is in the evidence, so "can't tell" is **too cautious**.
+- The leak test uses a fake model built to leak: test the alarm by setting it off.
+- **First real run (gpt-4o):** the three real causes found 3/3 each time; grounded 100%; 0 leaks; but the side-effect questions were only **67% consistent**, with **1 "wrong cause"**. Same question, different answers: the AI is not a function. That is why it only drafts, is checked, and a person signs.
+- **Keyword grading is crude** and can be fooled both ways. Three ways to grade AI text: keyword rules (cheap), an AI judge (understands meaning, but you must trust the judge), people reviewing a sample (the reference). Teams use all three.
+- **Check question, half right:** would `temperature` 0 make the explanations better? I said more consistent (right). But **consistent is not correct**: it could give the wrong answer every time, and it hides the wobble, which is a useful "I'm unsure" signal. Hosted models aren't fully repeatable even at 0.
+
+### Step 8: Saved, comparable reports (`evals/report.py`)
+**What:** every eval run is saved to `data/evals/<UTC time>.json` with its provenance and every AI answer word for word, and compared with the previous report ("Changed since the last report: ..."). Wrong-cause answers are printed in full. **262 passed.**
+**Learned:**
+- The useful question isn't "is it good?" but **"did my change make it better or worse?"**: that needs the old report, the new one, and what produced each.
+- **An eval of text must keep the text**, so a person can check the grader.
+- **Second real run:** 100% consistent, 0 wrong causes, 100% acceptable: same code, prompt and model as the first run, different scores. **An eval is itself a sample**; trust trends over several reports, not one run.
+- The report recorded `uncommitted_changes: true` because I ran it before committing: provenance was honest about it. Commit first, then run, for a report you rely on.
+- **My paste slip, and a weak test:** `answers = []` went **inside** the loop, so only the last answer was kept (1 per finding, not 3). All tests passed because the test asked only **once**. Fixed; the test now asks twice and checks both answers are kept. Lesson: test with the smallest case where the bug **would** show, and watch a new test fail before trusting it.
+- Claude's slip: its scratch copy was wiped overnight and its file check said "matches" against files that no longer existed. Caught and rebuilt; it now checks the scratch file exists first.
+
+**Phase 7 in 60 seconds:** every action that matters is written to an **append-only, hash-chained audit log** at the doorways (runner and CLI): who started a run, every answer (including refused and late ones), every step, every result. Editing, removing or reordering any entry breaks the chain; `taxagent audit` and the Audit tab verify it, and keeping the newest hash elsewhere also catches a log cut short. Every run records its **provenance**: code commit, prompt hashes, models, thresholds. Three **evals** measure the system against an answer key: detection (recall and precision on the planted errors: 100%/100%), extraction (98.4% read exactly, 0 confidently wrong, 0 invented), and, on request because it costs money, the AI's explanations (grounded, right cause, consistent, no leaks). Every eval run is saved with its provenance and the AI's words, and compared with the last, so the question becomes "did this change make it better?". Honest limits: the chain is tamper-evident, not tamper-proof, without an outside copy; our answer key was written by the builders; and one eval run is a sample.
