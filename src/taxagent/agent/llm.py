@@ -8,6 +8,7 @@ that we would have to guess how to read).
 import os
 from typing import Any, TypeVar
 
+from langsmith.wrappers import wrap_openai
 from openai import AzureOpenAI, OpenAI
 from pydantic import BaseModel
 
@@ -42,6 +43,11 @@ class LLM:
         return response.output_parsed
 
 
+def tracing_on() -> bool:
+    """LangSmith tracing is off unless .env switches it on: traces leave this machine."""
+    return os.environ.get("LANGSMITH_TRACING", "").lower() == "true"
+
+
 def llm_from_env(roster: dict[str, str]) -> LLM:
     """Pick the provider from config: moving to Azure is a .env change, not a rewrite."""
     provider = os.environ.get("LLM_PROVIDER", "openai")
@@ -55,6 +61,8 @@ def llm_from_env(roster: dict[str, str]) -> LLM:
         )
     else:
         raise ValueError(f"Unknown LLM_PROVIDER {provider!r}: use 'openai' or 'azure'")
+    if tracing_on():
+        client = wrap_openai(client)  # each LLM call also shows up in LangSmith
 
     # On Azure these are deployment names; on OpenAI, model names
     models = {"small": os.environ["MODEL_SMALL"], "large": os.environ["MODEL_LARGE"]}

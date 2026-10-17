@@ -1,3 +1,4 @@
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -89,3 +90,32 @@ def test_unknown_provider_is_rejected(monkeypatch):
 
     with pytest.raises(ValueError, match="mystery"):
         llm_from_env(ROSTER)
+
+
+def openai_env(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("MODEL_SMALL", "tiny-model")
+    monkeypatch.setenv("MODEL_LARGE", "big-model")
+
+
+def test_tracing_is_off_unless_switched_on(monkeypatch):
+    openai_env(monkeypatch)
+    monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
+
+    llm = llm_from_env(ROSTER)
+
+    assert not hasattr(llm.client.responses.parse, "__wrapped__")  # not traced
+
+
+def test_switching_tracing_on_traces_every_llm_call(monkeypatch):
+    openai_env(monkeypatch)
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+
+    llm = llm_from_env(ROSTER)
+
+    assert hasattr(llm.client.responses.parse, "__wrapped__")  # wrapped by LangSmith
+
+
+def test_the_tests_themselves_never_trace():
+    assert os.environ["LANGSMITH_TRACING"] == "false"  # set in conftest.py

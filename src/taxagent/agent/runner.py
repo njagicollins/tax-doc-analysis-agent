@@ -41,7 +41,8 @@ def checkpointer() -> SqliteSaver:
 
 
 def config(run_id: str) -> dict:
-    return {"configurable": {"thread_id": run_id}}
+    # run_name: a trace in LangSmith is named like the run in the audit log
+    return {"configurable": {"thread_id": run_id}, "run_name": run_id}
 
 
 def record_of(values: dict) -> dict | None:
