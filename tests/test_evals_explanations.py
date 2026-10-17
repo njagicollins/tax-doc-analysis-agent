@@ -76,8 +76,10 @@ def test_a_leaked_name_is_counted(world):  # noqa: F811
 
 
 def test_every_answer_is_kept_word_for_word(world):  # noqa: F811
-    result = run_explanation_eval(make_llm=fake_llm, repeats=1)
+    result = run_explanation_eval(make_llm=fake_llm, repeats=2)
 
-    [answer] = result["findings"][0]["answers"]
-    assert answer["text"] == "See the evidence."  # what the fake said
-    assert answer["verdict"] == "honest: can't tell"
+    answers = result["findings"][0]["answers"]
+    assert len(answers) == 2  # one per time it was asked, none thrown away
+    assert answers[0]["text"] == "See the evidence."  # what the fake said
+    assert answers[0]["verdict"] == "honest: can't tell"
+

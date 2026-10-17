@@ -70,8 +70,8 @@ def run_explanation_eval(
                 shown = is_cause and error["type"] in SHOWN_IN_EVIDENCE
 
                 verdicts, grounded, leaks, seconds = Counter(), 0, 0, 0.0
+                answers = []
                 for _ in range(repeats):
-                    answers = []
                     started = time.perf_counter()
                     result = explain_finding(llm, finding, values, previous)
                     seconds += time.perf_counter() - started
