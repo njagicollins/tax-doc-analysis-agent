@@ -1,0 +1,22 @@
+# Runs the same checks as on your machine, on a fresh computer, for every
+# push and every pull request. A red cross on GitHub means: don't merge.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read  # least privilege: CI only needs to read the code
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4      # get the code
+      - uses: astral-sh/setup-uv@v6    # install uv
+      - run: uv sync --locked          # exactly the versions in uv.lock
+      - run: uv run ruff format --check src tests evals
+      - run: uv run ruff check .
+      - run: uv run pytest -q
