@@ -81,7 +81,7 @@ docs/                 architecture.md, plan.md
 - [X] Phase 3: extraction + schema
 - [X] Phase 4: deterministic compute
 - [X] Phase 5: LangGraph agent
-- [ ] Phase 6: Streamlit app
+- [X] Phase 6: Streamlit app
 - [ ] Phase 7: audit + evals
 - [ ] Phase 8: polish + demo walkthrough
 

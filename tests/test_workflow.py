@@ -22,6 +22,7 @@ from taxagent.agent.runner import (
 )
 from taxagent.agent.summary import Summary
 from taxagent.agent.workflow import build_workflow
+from taxagent.audit.log import read_entries, verify
 from taxagent.extraction.run import run_extraction
 from taxagent.ingestion.pipeline import ingest
 from taxagent.ingestion.sources import SqlPayrollSource
@@ -377,3 +378,67 @@ def test_a_refused_answer_also_changes_the_version(world):
 
     assert refused["pending"]["problems"]  # maker-checker: asked again
     assert refused["version"] != run["version"]  # so other open pages are out of date
+
+
+def test_everything_a_run_does_is_written_to_the_audit_log(world):
+    run = start_run("2026Q2", make_llm=fake_llm, actor="carol")
+    run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+    resume_run(run["run_id"], sign_off("alice"), make_llm=fake_llm)  # refused
+    resume_run(run["run_id"], sign_off("bob"), make_llm=fake_llm)
+
+    log = read_entries()
+    assert [(entry["event"], entry["actor"]) for entry in log] == [
+        ("run_started", "carol"),
+        ("step_finished", "system"),  # extract
+        ("answer_received", "alice"),
+        ("step_finished", "system"),  # human_review
+        ("step_finished", "system"),  # compute
+        ("step_finished", "system"),  # explain
+        ("step_finished", "system"),  # summarize
+        ("answer_received", "alice"),
+        ("answer_refused", "system"),  # maker-checker
+        ("answer_received", "bob"),
+        ("step_finished", "system"),  # sign_off
+        ("step_finished", "system"),  # finalize
+        ("run_finished", "system"),
+    ]
+    assert {entry["details"]["run_id"] for entry in log} == {run["run_id"]}
+    assert log[8]["details"]["problems"][0].startswith("maker-checker: alice")
+    assert log[-1]["details"]["status"] == "approved"
+    assert log[1]["details"]["finished_at"] <= log[1]["at"]  # done, then written down
+
+    assert verify() == []  # and the chain is intact
+
+
+def test_an_answer_that_came_too_late_is_written_down_too(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+    resume_run(
+        run["run_id"], full_review("alice"), make_llm=fake_llm, expected=run["version"]
+    )
+
+    with pytest.raises(StaleAnswerError):
+        resume_run(
+            run["run_id"],
+            full_review("bob"),
+            make_llm=fake_llm,
+            expected=run["version"],
+        )
+
+    last = read_entries()[-1]
+    assert (last["event"], last["actor"]) == ("answer_out_of_date", "bob")
+
+
+def test_a_run_remembers_what_it_was_made_with(world):
+    run = start_run("2026Q2", make_llm=fake_llm)
+
+    made_with = run["made_with"]
+    assert made_with["models"] == {"small": "tiny-model", "large": "big-model"}
+    assert "explain_finding.v1.md" in made_with["prompts"]
+    assert read_entries()[0]["details"]["made_with"] == made_with  # in the log too
+
+    run = resume_run(run["run_id"], full_review("alice"), make_llm=fake_llm)
+    resume_run(run["run_id"], sign_off("bob"), make_llm=fake_llm)
+    saved = json.loads(
+        Path(f"data/results/2026Q2/{run['run_id']}.json").read_text(encoding="utf-8")
+    )
+    assert saved["made_with"] == made_with  # and in the result file

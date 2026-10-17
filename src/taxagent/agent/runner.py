@@ -17,6 +17,8 @@ from langgraph.types import Command
 from taxagent.agent.llm import LLM, llm_from_env
 from taxagent.agent.roster import load_roster
 from taxagent.agent.workflow import build_workflow, sign_off_request
+from taxagent.audit.log import append_event
+from taxagent.audit.provenance import provenance
 from taxagent.ingestion.manifest import new_run_id
 
 RUNS_DIR = Path("data/runs")
@@ -74,6 +76,7 @@ def snapshot(workflow, run_id: str) -> dict:
     return {
         "run_id": run_id,
         "quarter": state.values.get("quarter"),
+        "made_with": state.values.get("made_with"),
         "status": state.values.get("status"),
         "version": fingerprint(
             state.config["configurable"].get("checkpoint_id"), pending
@@ -96,14 +99,39 @@ def quarter_of(run_id: str, saver: SqliteSaver) -> str:
 # opens one and passes it in each time; a short one (the CLI) lets a new one be made.
 
 
+def audit_progress(run: dict, already: int) -> None:
+    """Write what the run just did to the audit log.
+
+    `already` is how many steps had finished before, so each step is written once.
+    """
+    run_id = run["run_id"]
+    for line in run["trace"][already:]:
+        details = {key: line[key] for key in ("step", "did", "notes", "finished_at")}
+        append_event("step_finished", "system", {"run_id": run_id, **details})
+    if run["pending"] is None:
+        append_event(
+            "run_finished", "system", {"run_id": run_id, "status": run["status"]}
+        )
+
+
 def start_run(
-    quarter: str, make_llm: MakeLLM = llm_from_env, saver: SqliteSaver | None = None
+    quarter: str,
+    make_llm: MakeLLM = llm_from_env,
+    saver: SqliteSaver | None = None,
+    actor: str = "system",
 ) -> dict:
     run_id = f"{quarter}-{new_run_id()}"
     saver = saver or checkpointer()
-    workflow = build_workflow(make_llm(load_roster(quarter)), saver)
-    workflow.invoke({"quarter": quarter}, config(run_id))
-    return snapshot(workflow, run_id)
+    llm = make_llm(load_roster(quarter))
+    workflow = build_workflow(llm, saver)
+    made_with = provenance(llm.models)
+    details = {"run_id": run_id, "quarter": quarter, "made_with": made_with}
+    append_event("run_started", actor, details)
+    # Saved in the run too, so the result file carries what produced it
+    workflow.invoke({"quarter": quarter, "made_with": made_with}, config(run_id))
+    run = snapshot(workflow, run_id)
+    audit_progress(run, already=0)
+    return run
 
 
 def run_status(run_id: str, saver: SqliteSaver | None = None) -> dict:
@@ -127,14 +155,28 @@ def resume_run(
     saver = saver or checkpointer()
     quarter = quarter_of(run_id, saver)
     workflow = build_workflow(make_llm(load_roster(quarter)), saver)
+    who = answer.get("reviewer") or answer.get("signer") or "unknown"
     with ANSWERING:
         now = snapshot(workflow, run_id)
         if expected is not None and now["version"] != expected:
+            append_event("answer_out_of_date", who, {"run_id": run_id})
             raise StaleAnswerError(f"{run_id} changed after this answer was written")
         if now["pending"] is None:
             raise ValueError(f"{run_id} is not waiting for anyone")
+        asked = now["pending"]["step"]
+        # Written before acting, so the log has the answer even if the next line fails
+        append_event(
+            "answer_received", who, {"run_id": run_id, "asked": asked, "answer": answer}
+        )
         workflow.invoke(Command(resume=answer), config(run_id))
-    return snapshot(workflow, run_id)
+        after = snapshot(workflow, run_id)
+        if len(after["trace"]) == len(now["trace"]):  # no step finished: asked again
+            problems = after["pending"]["problems"]
+            append_event(
+                "answer_refused", "system", {"run_id": run_id, "problems": problems}
+            )
+        audit_progress(after, already=len(now["trace"]))
+    return after
 
 
 def list_runs(saver: SqliteSaver | None = None) -> list[dict]:
