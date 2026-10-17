@@ -71,12 +71,22 @@ def run_explanation_eval(
 
                 verdicts, grounded, leaks, seconds = Counter(), 0, 0, 0.0
                 for _ in range(repeats):
+                    answers = []
                     started = time.perf_counter()
                     result = explain_finding(llm, finding, values, previous)
                     seconds += time.perf_counter() - started
                     text = " ".join(claim.text for claim in result.explanation.claims)
                     can_tell = result.explanation.can_determine_cause
-                    verdicts[verdict(text, can_tell, words, shown)] += 1
+                    said = verdict(text, can_tell, words, shown)
+                    verdicts[said] += 1
+                    answers.append(
+                        {
+                            "verdict": said,
+                            "can_determine_cause": can_tell,
+                            "text": text,
+                            "problems": list(result.problems),
+                        }
+                    )
                     grounded += not result.problems
                     leaks += sum(name in text for name in roster.values())
                 rows.append(
@@ -88,6 +98,7 @@ def run_explanation_eval(
                         "consistent": max(verdicts.values()) / repeats,
                         "leaks": leaks,
                         "seconds": seconds / repeats,
+                        "answers": answers,
                     }
                 )
             previous = values

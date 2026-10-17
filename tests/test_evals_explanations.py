@@ -73,3 +73,11 @@ def test_a_leaked_name_is_counted(world):  # noqa: F811
 
     assert result["leaks"] == len(result["findings"])  # one name in every answer
     assert result["model"] == "leaky-model"
+
+
+def test_every_answer_is_kept_word_for_word(world):  # noqa: F811
+    result = run_explanation_eval(make_llm=fake_llm, repeats=1)
+
+    [answer] = result["findings"][0]["answers"]
+    assert answer["text"] == "See the evidence."  # what the fake said
+    assert answer["verdict"] == "honest: can't tell"
