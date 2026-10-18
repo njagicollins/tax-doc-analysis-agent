@@ -83,6 +83,6 @@ docs/                 architecture.md, plan.md
 - [X] Phase 5: LangGraph agent
 - [X] Phase 6: Streamlit app
 - [X] Phase 7: audit + evals
-- [ ] Phase 8: polish + demo walkthrough
+- [X] Phase 8: polish + demo walkthrough
 
 Update this checklist as phases are completed.

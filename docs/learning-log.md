@@ -1287,3 +1287,49 @@ I looked at the sign-off screen and asked for: no huge blank gap, a way to reope
 **Phase 7 in 60 seconds:** every action that matters is written to an **append-only, hash-chained audit log** at the doorways (runner and CLI): who started a run, every answer (including refused and late ones), every step, every result. Editing, removing or reordering any entry breaks the chain; `taxagent audit` and the Audit tab verify it, and keeping the newest hash elsewhere also catches a log cut short. Every run records its **provenance**: code commit, prompt hashes, models, thresholds. Three **evals** measure the system against an answer key: detection (recall and precision on the planted errors: 100%/100%), extraction (98.4% read exactly, 0 confidently wrong, 0 invented), and, on request because it costs money, the AI's explanations (grounded, right cause, consistent, no leaks). Every eval run is saved with its provenance and the AI's words, and compared with the last, so the question becomes "did this change make it better?". Honest limits: the chain is tamper-evident, not tamper-proof, without an outside copy; our answer key was written by the builders; and one eval run is a sample.
 
 **✅ Phase 7 complete** (PR #10 merged).
+
+---
+
+## Phase 8: Polish and the demo
+
+**Why this phase:** the system worked and was tested. Phase 8 makes it something other people can **trust, run and understand**: a stranger opening the GitHub page should know what it does in a minute and run it in ten.
+
+### Step 1: App smoke test (`tests/test_app.py`)
+**What:** starts the app without a browser (`AppTest`) and fails if any of the four tabs is empty or raises an error, before any run and after a signed run. **264 passed.**
+**Learned:**
+- A **smoke test** = switch it on and see if smoke comes out. It doesn't check the numbers, only that everything opens.
+- It catches exactly the Phase 7 bug (three blank tabs while every test passed). Claude proved it by unwiring the Dashboard tab: "the Dashboard tab is empty".
+- `st.cache_resource.clear()`: the app keeps one database connection for its whole life, so each test must drop the previous test's connection.
+
+### Step 2: CI with GitHub Actions (`.github/workflows/ci.yml`)
+**What:** on every push and pull request, a fresh Linux machine installs exactly what `uv.lock` says and runs `ruff format --check`, `ruff check` and `pytest`. Green on the first run (43 s).
+**Learned:**
+- **CI (continuous integration)** = nobody can forget the checks, "works on my machine" gets tested on a clean machine, and a pull request shows its result before merging.
+- `permissions: contents: read` = least privilege again. `uv sync --locked` fails if `uv.lock` is out of date.
+- The tests use the fake AI, so CI needs no API key and costs nothing.
+- **Pinning:** GitHub warned that `ubuntu-latest` would move to Ubuntu 26 and that our steps used the retiring Node.js 20. Fixed with `ubuntu-24.04`, `actions/checkout@v7`, `astral-sh/setup-uv@v10.3.0` (that one has no short `v10` tag). Moving names (`ubuntu-latest`, `gpt-4o`) change under you; **pin, and upgrade on purpose**. Strictest version: pin each step to a commit hash (protects against **supply-chain attacks**).
+- **Ruleset "pull request + CI must pass" on `main`:** pull request required (0 approvals: I can't approve my own), status check `checks` required, no bypass. On a free plan rulesets only work on **public** repositories.
+- **Making the repo public:** before that, Claude scanned the **whole git history**: no API key ever committed, `data/` never committed, only a dev password for the local fake ADP. Public shows every commit ever made, not just today's files.
+
+### Step 3: LangSmith tracing, opt-in (`agent/llm.py`, `runner.py`, `conftest.py`)
+**What:** `uv add langsmith`; with `LANGSMITH_TRACING=true` in `.env`, `wrap_openai` wraps the client so every AI call is traced; LangGraph traces every step; each trace is named after the run id. **267 passed.**
+**Learned:**
+- **If you import it, declare it:** LangSmith was already installed via LangGraph, but our code now imports it directly.
+- **One doorway paid off again:** one line in `llm_from_env` traces every AI call in the system.
+- **Safe by default, powerful by choice.** `.env.example` (public template) says `false`; my own `.env` says `true`. Tests force `false` in `conftest.py` (`load_dotenv` never overrides a value already set), so tests and CI never send traces.
+- **API key type "Tracing Only"** (write-only) = least privilege: if it leaked, nobody could read my traces. Expires in 90 days: if traces stop one day, check the key first.
+- **What I saw:** LangSmith grouped my run's traces into a **thread** (our `thread_id`), one **turn** per resume. A run started before tracing (12 Oct) was missing its first part.
+- **What leaves when tracing is on:** the workflow state (employee IDs, wage amounts, decisions), never names. For real data: **self-host** (the tracing software runs inside our own cloud, so nothing leaves; full debugging; we run it ourselves; LangSmith enterprise or open-source Langfuse) or **`LANGSMITH_HIDE_INPUTS` / `HIDE_OUTPUTS`** (only step names, timings, errors and tokens are sent; personal data stays, but so does most of the debugging value). A middle way: a function that masks only sensitive fields.
+- The 1 warning comes from inside LangSmith (it renamed one of its own modules), not our code. Don't hide warnings you don't understand.
+
+### Step 4: README (`README.md`, `tests/test_readme.py`)
+**What:** what it does, a Mermaid diagram, design rules, a quickstart **tested on a fresh clone of the public repo**, a five-minute demo, evals with honest limits, commands, layout, local vs Azure, known limits. Two tests: the diagram names **every workflow step** (word-boundary regex), and every `taxagent ...` command in it **exists**. Both proven to fail on a broken README. **269 passed.**
+**Learned:**
+- GitHub and VS Code draw Mermaid with **different themes**; uncoloured boxes take the viewer's theme. Fix: `%%{init: {"theme": "base", ...}}%%` plus a colour for every box. GitHub's page background can't be changed, so the whole diagram sits in an outer `subgraph frame` filled navy (with `direction TB`, or Mermaid turns it sideways).
+- I chose no icons: shapes and colours carry the meaning (cylinders = kept data, pills = a person acts, violet = AI drafts).
+- GitHub's front page shows `main`: a README on a branch only appears after merging (or via the branch dropdown).
+- Docker Compose: **skipped on purpose**; the quickstart already works with uv. "Containerise it" is an honest next step for deployment.
+
+**Phase 8 in 60 seconds:** an app smoke test opens every tab headlessly, so a blank or broken tab fails the tests. GitHub Actions runs ruff and all the tests on a fresh pinned Linux machine for every push, and a ruleset on the now-public repository blocks merging into `main` unless CI is green. LangSmith tracing is one line in the single LLM doorway, off by default, never on in tests, with a write-only key; for real data it would be self-hosted or have inputs and outputs hidden. The README explains the project with a themed Mermaid diagram, a quickstart tested on a fresh clone, a five-minute demo and honest limits, and two tests keep it in step with the code.
+
+**✅ Phase 8 complete. ✅ Project complete** (all eight phases).
