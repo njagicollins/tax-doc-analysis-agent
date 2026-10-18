@@ -1331,3 +1331,5 @@ I looked at the sign-off screen and asked for: no huge blank gap, a way to reope
 - Docker Compose: **skipped on purpose**; the quickstart already works with uv. "Containerise it" is an honest next step for deployment.
 
 **Phase 8 in 60 seconds:** an app smoke test opens every tab headlessly, so a blank or broken tab fails the tests. GitHub Actions runs ruff and all the tests on a fresh pinned Linux machine for every push, and a ruleset on the now-public repository blocks merging into `main` unless CI is green. LangSmith tracing is one line in the single LLM doorway, off by default, never on in tests, with a write-only key; for real data it would be self-hosted or have inputs and outputs hidden. The README explains the project with a themed Mermaid diagram, a quickstart tested on a fresh clone, a five-minute demo and honest limits, and two tests keep it in step with the code.
+
+**✅ Phase 8 complete. ✅ Project complete** (all eight phases).
